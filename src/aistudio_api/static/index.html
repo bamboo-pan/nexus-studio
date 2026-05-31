@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Local Studio</title>
+<title>Nexus Studio</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body x-data="app()" x-init="init()" :class="{'sidebar-collapsed':sidebarCollapsed}">
@@ -13,7 +13,7 @@
 <nav class="sidebar" :class="{open:sidebarOpen}">
   <div class="sidebar-header">
     <div class="logo">AI</div>
-    <span class="sidebar-title">AI Studio Proxy</span>
+    <span class="sidebar-title">Nexus Studio</span>
     <button type="button" class="sidebar-toggle" @click="toggleSidebarCollapsed()" :title="sidebarCollapsed?'展开侧边栏':'收起侧边栏'" :aria-label="sidebarCollapsed?'展开侧边栏':'收起侧边栏'" :aria-pressed="sidebarCollapsed.toString()">
       <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
     </button>

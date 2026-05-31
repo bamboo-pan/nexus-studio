@@ -249,7 +249,8 @@ def test_static_frontend_exposes_local_studio_workbench():
     index_html = (ROOT / "src" / "aistudio_api" / "static" / "index.html").read_text(encoding="utf-8")
     style_css = (ROOT / "src" / "aistudio_api" / "static" / "style.css").read_text(encoding="utf-8")
 
-    assert "<title>Local Studio</title>" in index_html
+    assert "<title>Nexus Studio</title>" in index_html
+    assert '<span class="sidebar-title">Nexus Studio</span>' in index_html
     assert "/static/app.js?v=20260531-stream-rendering" in index_html
     assert "OpenAI Local Studio" not in index_html
     assert "view==='studio'" in index_html
