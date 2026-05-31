@@ -25,7 +25,7 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 1. 在wsl home目录下下新建临时目录实际测试
    1. \\wsl.localhost\Ubuntu-24.04\home\bamboo
 2. 真实凭据
-   1. \\wsl.localhost\Ubuntu-24.04\home\bamboo\aistudio-api\data\accounts
+   1. \\wsl.localhost\Ubuntu-24.04\home\bamboo\nexus-studio\data\accounts
 3. 除了文档更新类的改动，其他所有改动必须最终真实环境测试通过
    1. 真实测试必须包括API层面和前端UI实际使用层面的测试，不能替代省略
    2. 测试local studio的真实openai key在
