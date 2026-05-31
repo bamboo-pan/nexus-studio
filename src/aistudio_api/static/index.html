@@ -1,0 +1,1305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Local Studio</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body x-data="app()" x-init="init()" :class="{'sidebar-collapsed':sidebarCollapsed}">
+
+<div class="overlay" :class="{open:sidebarOpen}" @click="sidebarOpen=false"></div>
+
+<nav class="sidebar" :class="{open:sidebarOpen}">
+  <div class="sidebar-header">
+    <div class="logo">AI</div>
+    <span class="sidebar-title">AI Studio Proxy</span>
+    <button type="button" class="sidebar-toggle" @click="toggleSidebarCollapsed()" :title="sidebarCollapsed?'展开侧边栏':'收起侧边栏'" :aria-label="sidebarCollapsed?'展开侧边栏':'收起侧边栏'" :aria-pressed="sidebarCollapsed.toString()">
+      <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+    </button>
+  </div>
+  <div class="nav-section">
+    <button class="nav-item" :class="{active:view==='chat'}" @click="go('chat')" title="Playground" aria-label="Playground">
+      <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+      <span class="nav-label">Playground</span>
+    </button>
+    <button class="nav-item" :class="{active:view==='studio'}" @click="go('studio')" title="Local Studio" aria-label="Local Studio">
+      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10"/><path d="M7 12h5"/><path d="M14 15l2 2 4-5"/></svg>
+      <span class="nav-label">Local Studio</span>
+    </button>
+    <button class="nav-item" :class="{active:view==='images'}" @click="go('images')" title="图片生成" aria-label="图片生成">
+      <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+      <span class="nav-label">图片生成</span>
+    </button>
+    <button class="nav-item" :class="{active:view==='requests'}" @click="go('requests')" title="请求记录" aria-label="请求记录">
+      <svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M8 8h8"/><path d="M8 12h8"/><path d="M8 16h5"/></svg>
+      <span class="nav-label">请求记录</span>
+    </button>
+    <button class="nav-item" :class="{active:view==='config'}" @click="go('config')" title="系统配置" aria-label="系统配置">
+      <svg viewBox="0 0 24 24"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M2 14h4"/><path d="M10 8h4"/><path d="M18 16h4"/></svg>
+      <span class="nav-label">系统配置</span>
+    </button>
+    <button class="nav-item" :class="{active:view==='accounts'}" @click="go('accounts')" title="账号管理" aria-label="账号管理">
+      <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+      <span class="nav-label">账号管理</span>
+    </button>
+  </div>
+  <div class="sidebar-footer"><div class="dot"></div><span class="sidebar-footer-label">系统在线</span></div>
+</nav>
+
+<div class="main">
+  <div class="topbar">
+    <div class="topbar-left">
+      <button class="mh-btn" @click="sidebarOpen=true" title="打开侧边栏" aria-label="打开侧边栏">☰</button>
+      <span class="topbar-title" x-text="pageTitle"></span>
+    </div>
+    <div class="topbar-right api-toolbar">
+      <div class="api-control" x-show="view==='chat'||view==='images'" x-cloak>
+        <span>接口模式</span>
+        <div class="cselect api-select" :class="{open:openSelect==='interfaceMode'}" @click.stop>
+          <div class="cselect-btn" @click="toggleSelect('interfaceMode',$event)" tabindex="0"><span x-text="interfaceModeLabel||'OpenAI 兼容'">OpenAI 兼容</span><span class="arrow"></span></div>
+          <div class="cselect-menu">
+            <template x-for="option in interfaceModeOptions" :key="option.id">
+              <div class="cselect-opt" :class="{active:interfaceMode===option.id}" @click="selectInterfaceMode(option.id)" x-text="option.label"></div>
+            </template>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chat -->
+  <div id="chat-page" class="playground-page" :class="{active:view==='chat'}">
+    <div class="playground-shell" :class="{'side-collapsed':playgroundSideCollapsed}">
+      <section class="playground-main">
+        <div class="playground-header">
+          <div class="playground-title-block">
+            <div class="playground-kicker">Playground</div>
+            <h1>模型调试工作台</h1>
+          </div>
+          <div class="playground-actions">
+            <div class="model-picker-row">
+              <div class="cselect cselect-lg playground-model-select" :class="{open:openSelect==='model'}" @click.stop>
+                <div class="cselect-btn" @click="toggleSelect('model',$event)" tabindex="0"><span x-text="modelsLoading?'加载模型中':model||'选择模型'">选择模型</span><span class="arrow"></span></div>
+                <div class="cselect-menu">
+                  <template x-for="m in textModels" :key="m.id">
+                    <div class="cselect-opt" :class="{active:model===m.id}" @click="selectModel(m.id)" x-text="m.id"></div>
+                  </template>
+                  <div class="cselect-opt" aria-disabled="true" x-show="!textModels.length" x-text="modelsLoading?'模型加载中':'暂无文本模型'"></div>
+                </div>
+              </div>
+              <button type="button" class="icon-btn model-refresh-btn" :disabled="modelsLoading" @click="refreshModels()" :title="modelsLoading?'刷新中':'刷新模型列表'" :aria-label="modelsLoading?'刷新中':'刷新模型列表'">
+                <svg viewBox="0 0 24 24" :class="{'spin':modelsLoading}"><path d="M21 12a9 9 0 11-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>
+              </button>
+            </div>
+            <span class="playground-status-pill" :class="{'is-live':busy}" x-text="chatStatusText"></span>
+            <button class="btn btn-sm" :disabled="busy||!msgs.length" @click="clearChat()">清空会话</button>
+          </div>
+        </div>
+
+        <div class="playground-chat-panel">
+          <div id="chat-scroll" class="playground-transcript">
+            <template x-for="(m,i) in msgs" :key="i">
+              <div class="msg" :class="{'msg-user':m.role==='user','msg-ai':m.role!=='user','msg-error':m.error}">
+                <div class="msg-inner">
+                  <div class="avatar" :class="m.role==='user'?'avatar-user':'avatar-ai'" x-text="m.role==='user'?'U':'AI'"></div>
+                  <div class="msg-content">
+                    <div class="msg-meta">
+                      <span x-text="m.role==='user'?'User':'Assistant'"></span>
+                      <div class="msg-actions">
+                        <button type="button" class="msg-tool msg-rerun" x-show="m.role!=='user'" :disabled="busy" @click.stop="rerunMessage(i)" title="重跑此轮" aria-label="重跑此轮">
+                          <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 11-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>
+                        </button>
+                        <button type="button" class="msg-tool" x-show="m.role==='user'" :disabled="busy" @click.stop="beginEditMessage(i)" title="编辑消息" aria-label="编辑消息">
+                          <svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg>
+                        </button>
+                        <div class="msg-menu-wrap" @click.stop>
+                          <button type="button" class="msg-tool" @click="toggleMessageMenu(i,$event)" title="更多操作" aria-label="更多操作" :aria-expanded="(messageMenuIndex===i).toString()">
+                            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></svg>
+                          </button>
+                          <div class="msg-menu" x-show="messageMenuIndex===i" x-cloak>
+                            <button type="button" x-show="m.role==='user'" :disabled="busy" @click="beginEditMessage(i)"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg><span>Edit</span></button>
+                            <button type="button" :disabled="busy" @click="rerunMessage(i)"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 11-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg><span>Rerun this turn</span></button>
+                            <button type="button" :disabled="busy" @click="branchFromMessage(i)"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.2 8.2L15.8 15.8"/><path d="M18 8a6 6 0 00-6 6"/></svg><span>Branch from here</span></button>
+                            <button type="button" @click="copyMessageText(m)"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg><span>Copy as text</span></button>
+                            <button type="button" @click="copyMessageMarkdown(m)"><svg viewBox="0 0 24 24"><path d="M5 3h8l6 6v12H5z"/><path d="M13 3v6h6"/><path d="M8 15h8"/><path d="M8 18h5"/></svg><span>Copy as markdown</span></button>
+                            <button type="button" :disabled="busy" @click="makeMessageApp(i)"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M8 9h8"/><path d="M8 13h3"/><path d="M14 13h2"/><path d="M8 17h8"/></svg><span>Make this an app</span></button>
+                            <button type="button" class="danger" :disabled="busy" @click="deleteMessage(i)"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg><span>Delete</span></button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="msg-edit" x-show="editingMessageIndex===i" x-cloak>
+                      <textarea x-model="editingMessageDraft" rows="3" @keydown.enter.prevent="if(!$event.shiftKey)saveEditedMessage(i)"></textarea>
+                      <div class="msg-edit-actions">
+                        <button type="button" class="btn btn-sm" @click="cancelEditMessage()">取消</button>
+                        <button type="button" class="btn btn-sm btn-primary" :disabled="busy" @click="saveEditedMessage(i)">保存并重跑</button>
+                      </div>
+                    </div>
+                    <template x-if="m.thinking">
+                      <div class="think-block" @click="m.showThinking=!m.showThinking">
+                        <div class="think-toggle"><span class="think-icon">TH</span><span>思考中</span><span class="think-arrow" :class="{open:m.showThinking}">›</span></div>
+                        <div class="think-body" x-show="m.showThinking" x-text="m.thinking"></div>
+                      </div>
+                    </template>
+                    <div class="msg-body" x-show="m.error||m.content" :class="{error:m.error,'markdown-body':!m.error&&m.role!=='user'}" x-html="messageBodyHtml(m)"></div>
+                    <div class="msg-usage" x-show="hasUsage(m)" x-cloak>
+                      <template x-for="item in messageUsageRows(m)" :key="item.label">
+                        <span><b x-text="item.label"></b><strong x-text="item.value"></strong></span>
+                      </template>
+                    </div>
+                    <div class="msg-images" x-show="m.files&&m.files.length" x-cloak>
+                      <template x-for="file in m.files" :key="file.url">
+                        <div>
+                          <img class="msg-image" x-show="file.isImage" :src="file.url" :alt="file.name||'uploaded image'">
+                          <div class="msg-file" x-show="!file.isImage"><span class="file-icon">FILE</span><span class="file-name" x-text="file.name"></span><span class="file-meta" x-text="file.mime"></span></div>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <div id="input-area">
+            <div id="input-box">
+              <div class="chat-input-meta">
+                <span x-text="chatParameterSummary"></span>
+                <span x-text="chatRunModeSummary"></span>
+              </div>
+              <div class="chat-attachments" x-show="chatFiles.length" x-cloak>
+                <template x-for="(file,index) in chatFiles" :key="file.url">
+                  <div class="chat-attachment">
+                    <img x-show="file.isImage" :src="file.url" :alt="file.name||'uploaded image'">
+                    <div class="chat-file-chip" x-show="!file.isImage"><span class="file-icon">FILE</span><span class="file-name" x-text="file.name"></span><span class="file-meta" x-text="fileSizeLabel(file.size)"></span></div>
+                    <button class="thumb-remove" @click="removeChatFile(index)" title="移除文件">×</button>
+                  </div>
+                </template>
+              </div>
+              <div class="notice notice-error chat-image-error" x-show="chatFileError" x-text="chatFileError" x-cloak></div>
+              <div class="notice notice-error chat-image-error" x-show="chatHasUnsupportedFiles" x-cloak>当前模型不支持文件输入</div>
+              <div class="input-row">
+                <input x-ref="chatFileInput" type="file" :accept="chatFileAccept" multiple hidden @change="attachChatFiles($event)">
+                <button class="attach-btn" :disabled="!chatFileUploadEnabled" @click="$refs.chatFileInput.click()" title="上传文件">
+                  <svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+                </button>
+                <textarea x-ref="ta" x-model="draft" @keydown.enter.prevent="if(!$event.shiftKey)send()" @input="resizeTa()" placeholder="给 AI Studio 代理发送消息..." rows="1"></textarea>
+                <button class="send" :disabled="!chatCanSend" @click="send()" title="发送">
+                  <svg viewBox="0 0 24 24"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="playground-side" :class="{'is-collapsed':playgroundSideCollapsed}">
+        <button type="button" class="playground-side-toggle" @click="togglePlaygroundSideCollapsed()" :title="playgroundSideCollapsed?'展开右侧栏':'收起右侧栏'" :aria-label="playgroundSideCollapsed?'展开右侧栏':'收起右侧栏'" :aria-pressed="playgroundSideCollapsed.toString()">
+          <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+        <section class="playground-panel chat-session-panel">
+          <div class="playground-panel-head">
+            <div>
+              <div class="playground-section-label">Sessions</div>
+              <h2>本地会话</h2>
+            </div>
+            <button class="btn btn-sm" :disabled="busy" @click="newChatSession()">新聊天</button>
+          </div>
+          <div class="notice notice-error chat-session-error" x-show="chatSessionError" x-text="chatSessionError" x-cloak></div>
+          <div class="chat-session-list" x-show="orderedChatSessions.length" x-cloak>
+            <template x-for="session in orderedChatSessions" :key="session.id">
+              <div class="chat-session-item" :class="{active:activeChatSessionId===session.id}">
+                <button type="button" class="chat-session-main" :disabled="busy" @click="restoreChatSession(session)">
+                  <strong x-text="session.title"></strong>
+                  <span x-text="chatSessionPreview(session)"></span>
+                  <small x-text="chatSessionMeta(session)"></small>
+                </button>
+                <button class="chat-session-delete" :disabled="busy" @click="deleteChatSession(session)" title="删除会话" aria-label="删除会话">×</button>
+              </div>
+            </template>
+          </div>
+        </section>
+
+        <section class="playground-panel chat-usage-panel">
+          <div class="playground-panel-head">
+            <div>
+              <div class="playground-section-label">Usage</div>
+              <h2>Token 统计</h2>
+            </div>
+          </div>
+          <div class="chat-usage-grid">
+            <template x-for="item in chatUsageRows" :key="item.label">
+              <div class="chat-usage-cell"><span x-text="item.label"></span><strong x-text="item.value"></strong></div>
+            </template>
+          </div>
+        </section>
+
+        <section class="playground-panel">
+          <div class="playground-panel-head">
+            <div>
+              <div class="playground-section-label">Capabilities</div>
+              <h2>模型能力</h2>
+            </div>
+          </div>
+          <div class="capability-grid">
+            <template x-for="item in chatCapabilityItems" :key="item.key">
+              <div class="capability-chip" :class="{available:item.available}">
+                <span x-text="item.label"></span>
+                <strong x-text="item.available?'可用':'不可用'"></strong>
+              </div>
+            </template>
+          </div>
+          <div class="capability-note" x-show="acceptedFileTypes.length" x-text="acceptedFileTypes.join(' / ')"></div>
+          <div class="notice notice-error image-inline-notice" x-show="modelError" x-text="modelError" x-cloak></div>
+        </section>
+
+        <section class="playground-panel">
+          <div class="playground-panel-head">
+            <div>
+              <div class="playground-section-label">Presets</div>
+              <h2>参数预设</h2>
+            </div>
+          </div>
+          <div class="preset-row">
+            <button type="button" class="preset-btn" :class="{active:chatPreset==='precise'}" @click="applyChatPreset('precise')">稳健</button>
+            <button type="button" class="preset-btn" :class="{active:chatPreset==='balanced'}" @click="applyChatPreset('balanced')">平衡</button>
+            <button type="button" class="preset-btn" :class="{active:chatPreset==='creative'}" @click="applyChatPreset('creative')">发散</button>
+          </div>
+          <div class="playground-control-grid">
+            <label class="playground-control" x-show="controlAvailable('temperature')"><span>Temperature</span><input class="cfg-num" type="number" x-model.number="cfg.temperature" min="0" max="2" step="0.1" @change="saveCurrentChatSession()"></label>
+            <label class="playground-control" x-show="controlAvailable('top_p')"><span>Top P</span><input class="cfg-num" type="number" x-model.number="cfg.topP" min="0" max="1" step="0.05" @change="saveCurrentChatSession()"></label>
+            <label class="playground-control" x-show="controlAvailable('max_tokens')"><span>Max Tokens</span><input class="cfg-num" type="number" x-model.number="cfg.maxTokens" min="1" max="65536" step="256" @change="saveCurrentChatSession()"></label>
+          </div>
+        </section>
+
+        <section class="playground-panel">
+          <div class="playground-panel-head">
+            <div>
+              <div class="playground-section-label">Runtime</div>
+              <h2>运行开关</h2>
+            </div>
+          </div>
+          <div class="runtime-toggles">
+            <div class="runtime-toggle" x-show="controlAvailable('stream')"><span>Stream</span><button type="button" :class="{active:cfg.stream==='on'}" @click="cfg.stream=cfg.stream==='on'?'off':'on';saveCurrentChatSession()" x-text="cfg.stream==='on'?'开启':'关闭'"></button></div>
+            <div class="runtime-toggle" x-show="controlAvailable('search')"><span>Search</span><button type="button" :class="{active:cfg.search==='on'}" @click="cfg.search=cfg.search==='on'?'off':'on';saveCurrentChatSession()" x-text="cfg.search==='on'?'开启':'关闭'"></button></div>
+            <div class="runtime-toggle" x-show="controlAvailable('safety')"><span>Safety</span><button type="button" :class="{active:cfg.safety==='on'}" @click="cfg.safety=cfg.safety==='on'?'off':'on';saveCurrentChatSession()" x-text="cfg.safety==='on'?'开启':'关闭'"></button></div>
+            <div class="runtime-toggle" x-show="controlAvailable('thinking')"><span>Thinking</span><div class="cselect" :class="{open:openSelect==='thinking'}" @click.stop><div class="cselect-btn" @click="toggleSelect('thinking',$event)" tabindex="0"><span x-text="cfg.thinking==='off'?'关闭':cfg.thinking==='low'?'低':cfg.thinking==='medium'?'中':cfg.thinking==='high'?'高':cfg.thinking"></span><span class="arrow"></span></div><div class="cselect-menu"><template x-for="v in ['off','low','medium','high']"><div class="cselect-opt" :class="{active:cfg.thinking===v}" @click="cfg.thinking=v;openSelect=null;saveCurrentChatSession()" x-text="v==='off'?'关闭':v==='low'?'低':v==='medium'?'中':v==='high'?'高':v"></div></template></div></div></div>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+  <!-- Local Studio -->
+  <div id="studio-page" class="page-wrap local-studio-page" :class="{active:view==='studio'}">
+    <div class="local-studio-shell">
+      <aside class="local-studio-history">
+        <div class="local-studio-pane-head">
+          <div>
+            <div class="local-studio-kicker">Conversations</div>
+            <h2>历史会话</h2>
+          </div>
+          <button class="btn btn-sm" :disabled="localStudioBusy" @click="createLocalStudioConversation()">新建</button>
+        </div>
+        <div class="local-studio-history-actions" x-show="localStudioConversations.length" x-cloak>
+          <button class="btn btn-sm" @click="localStudioAllSelected?clearLocalStudioSelection():selectAllLocalStudioConversations()" x-text="localStudioAllSelected?'清除':'全选'"></button>
+          <button class="btn btn-sm btn-danger-outline" :disabled="!localStudioSelectedCount||localStudioBusy" @click="deleteSelectedLocalStudioConversations()">批量删除</button>
+        </div>
+        <div class="notice notice-error" x-show="localStudioError" x-text="localStudioError" x-cloak></div>
+        <div class="local-studio-conversation-list" x-show="localStudioConversations.length" x-cloak>
+          <template x-for="conversation in localStudioConversations" :key="conversation.id">
+            <div class="local-studio-conversation" :class="{active:localStudioConversation&&localStudioConversation.id===conversation.id,selected:localStudioSelection[conversation.id]}">
+              <label class="local-studio-check" @click.stop>
+                <input type="checkbox" :checked="!!localStudioSelection[conversation.id]" @change="toggleLocalStudioSelection(conversation,$event)">
+                <span></span>
+              </label>
+              <button type="button" class="local-studio-conversation-main" :disabled="localStudioBusy" @click="restoreLocalStudioConversation(conversation)">
+                <strong x-text="conversation.title"></strong>
+                <span x-text="localStudioPreview(conversation)"></span>
+                <small x-text="localStudioMeta(conversation)"></small>
+              </button>
+              <div class="local-studio-row-actions">
+                <button type="button" class="msg-tool" :disabled="localStudioBusy" @click.stop="beginLocalStudioRename(conversation)" title="重命名" aria-label="重命名"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg></button>
+                <button type="button" class="msg-tool danger" :disabled="localStudioBusy" @click.stop="deleteLocalStudioConversation(conversation)" title="删除" aria-label="删除"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg></button>
+              </div>
+              <div class="local-studio-rename" x-show="localStudioRenameId===conversation.id" x-cloak @click.stop>
+                <input class="inline-input" x-model="localStudioRenameDraft" @keydown.enter.prevent="renameLocalStudioConversation(conversation)">
+                <div class="local-studio-rename-actions">
+                  <button class="btn btn-sm" @click="cancelLocalStudioRename()">取消</button>
+                  <button class="btn btn-sm btn-primary" @click="renameLocalStudioConversation(conversation)">保存</button>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+        <div class="local-studio-empty" x-show="!localStudioConversations.length&&!localStudioConversationLoading">暂无会话</div>
+      </aside>
+
+      <section class="local-studio-chat-panel">
+        <div class="local-studio-hero">
+          <div>
+            <div class="local-studio-kicker" x-text="localStudioInterfaceModeLabel">OpenAI Responses</div>
+            <h1>Local Studio</h1>
+          </div>
+          <div class="local-studio-status">
+            <span x-text="localStudioCanConnect()?'已配置接口':'等待接口'"></span>
+            <span x-text="localStudioModel||'未选择模型'"></span>
+            <span :class="{'is-live':localStudioBusy}" x-text="localStudioStatusText"></span>
+            <span x-text="localStudioRunSummary"></span>
+          </div>
+        </div>
+        <div class="notice notice-error" x-show="localStudioModelError" x-text="localStudioModelError" x-cloak></div>
+        <div id="local-studio-scroll" class="local-studio-transcript">
+          <template x-for="(message,index) in localStudioActiveMessages" :key="message.id||index">
+            <div class="local-studio-message" :class="message.role==='user'?'is-user':'is-assistant'">
+              <div class="avatar" :class="message.role==='user'?'avatar-user':'avatar-ai'" x-text="message.role==='user'?'U':'AI'"></div>
+              <div class="local-studio-message-body">
+                <div class="msg-meta">
+                  <span x-text="message.role==='user'?'User':'Assistant'"></span>
+                  <button type="button" class="msg-tool" :disabled="localStudioBusy" @click="rerunLocalStudioMessage(index)" title="从此处重跑" aria-label="从此处重跑"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 11-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg></button>
+                </div>
+                <template x-if="message.thinking">
+                  <div class="think-block" @click="message.showThinking=!message.showThinking">
+                    <div class="think-toggle"><span class="think-icon">TH</span><span>Reasoning summary</span><span class="think-arrow" :class="{open:message.showThinking}">›</span></div>
+                    <div class="think-body" x-show="message.showThinking" x-text="message.thinking"></div>
+                  </div>
+                </template>
+                <div class="msg-body" :class="{'markdown-body':message.role!=='user'}" x-show="localStudioMessageContent(message)" x-html="message.role==='user'?plainTextHtml(message.content):markdownToHtml(localStudioMessageContent(message))"></div>
+                <div class="msg-body error" x-show="localStudioMessageError(message)" x-text="localStudioMessageError(message)"></div>
+                <div class="local-studio-attachments" x-show="localStudioAttachments(message).length" x-cloak>
+                  <template x-for="file in localStudioAttachments(message)" :key="file.id||file.url">
+                    <a class="local-studio-file" :href="file.url" target="_blank" rel="noopener noreferrer"><span class="file-icon">FILE</span><span x-text="file.name"></span><small x-text="file.mime"></small></a>
+                  </template>
+                </div>
+                <div class="local-studio-images" x-show="localStudioMessageImages(message).length" x-cloak>
+                  <template x-for="image in localStudioMessageImages(message)" :key="image.id||image.url">
+                    <a :href="localStudioImageUrl(image)" target="_blank" rel="noopener noreferrer"><img :src="localStudioImageUrl(image)" :alt="image.name||'generated image'"></a>
+                  </template>
+                </div>
+                <div class="msg-usage" x-show="hasUsage(message)" x-cloak>
+                  <template x-for="item in messageUsageRows(message)" :key="item.label"><span><b x-text="item.label"></b><strong x-text="item.value"></strong></span></template>
+                </div>
+              </div>
+            </div>
+          </template>
+          <div class="local-studio-message is-assistant is-pending" x-show="localStudioBusy" x-cloak>
+            <div class="avatar avatar-ai">AI</div>
+            <div class="local-studio-message-body">
+              <div class="msg-meta"><span>Assistant</span></div>
+              <div class="local-studio-waiting"><span class="local-studio-spinner"></span><div><strong x-text="localStudioPendingTitle"></strong><small x-text="localStudioPendingDetail"></small></div></div>
+            </div>
+          </div>
+          <div class="local-studio-empty local-studio-empty-chat" x-show="!localStudioActiveMessages.length">选择 Provider 和模型后开始对话</div>
+        </div>
+        <div class="local-studio-composer">
+          <div class="local-studio-file-strip" x-show="localStudioFiles.length" x-cloak>
+            <template x-for="(file,index) in localStudioFiles" :key="file.url">
+              <div class="chat-attachment">
+                <img x-show="file.isImage" :src="file.url" :alt="file.name">
+                <div class="chat-file-chip" x-show="!file.isImage"><span class="file-icon">FILE</span><span class="file-name" x-text="file.name"></span><span class="file-meta" x-text="fileSizeLabel(file.size)"></span></div>
+                <button class="thumb-remove" @click="removeLocalStudioFile(index)" title="移除文件">×</button>
+              </div>
+            </template>
+          </div>
+          <div class="notice notice-error" x-show="localStudioFileError" x-text="localStudioFileError" x-cloak></div>
+          <div class="local-studio-compose-row">
+            <input x-ref="localStudioFileInput" type="file" :accept="localStudioFileAccept()" multiple hidden @change="attachLocalStudioFiles($event)">
+            <button class="attach-btn" :disabled="localStudioBusy" @click="$refs.localStudioFileInput.click()" title="上传附件"><svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg></button>
+            <textarea x-model="localStudioDraft" rows="1" placeholder="向 Local Studio 发送消息、图片或文件..." @keydown.enter.prevent="if(!$event.shiftKey)sendLocalStudioMessage()"></textarea>
+            <button class="send" :disabled="!localStudioCanSend" @click="sendLocalStudioMessage()" title="发送"><svg viewBox="0 0 24 24"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
+          </div>
+        </div>
+      </section>
+
+      <aside class="local-studio-settings">
+        <section class="local-studio-panel">
+          <div class="local-studio-pane-head">
+            <div>
+              <div class="local-studio-kicker">Connection</div>
+              <h2>接口</h2>
+            </div>
+            <button class="btn btn-sm btn-primary" :disabled="localStudioModelsLoading||!localStudioCanConnect()" @click="loadLocalStudioModels()" x-text="localStudioModelsLoading?'加载中':'加载模型'"></button>
+          </div>
+          <div class="local-studio-field">
+            <span>Provider</span>
+            <div class="local-studio-provider-row">
+              <div class="cselect local-studio-select" :class="{open:openSelect==='localStudioProvider'}" @click.stop>
+                <div class="cselect-btn" @click="toggleSelect('localStudioProvider',$event)" tabindex="0"><span x-text="currentLocalStudioProvider().name||'选择 Provider'"></span><span class="arrow"></span></div>
+                <div class="cselect-menu">
+                  <template x-for="provider in localStudioProviderOptions" :key="provider.id"><div class="cselect-opt" :class="{active:localStudioProviderId===provider.id}" @click="selectLocalStudioProvider(provider.id)" x-text="provider.label"></div></template>
+                </div>
+              </div>
+              <button type="button" class="btn btn-sm" @click="addLocalStudioProvider()">新增</button>
+              <button type="button" class="btn btn-sm" x-show="localStudioProviderType==='openai'" x-cloak @click="removeLocalStudioProvider()">删除</button>
+            </div>
+          </div>
+          <div class="local-studio-size-note">Provider Type: <span x-text="localStudioProviderTypeLabel()"></span></div>
+          <label class="local-studio-field"><span>Provider Name</span><input type="text" x-model="localStudioSettings.name" @change="saveLocalStudioSettings()" placeholder="Google AI Studio"></label>
+          <label class="local-studio-field" x-show="localStudioProviderType==='openai'" x-cloak><span>Base URL</span><input type="url" x-model="localStudioSettings.baseUrl" @change="saveLocalStudioSettings()" placeholder="https://api.openai.com/v1"></label>
+          <label class="local-studio-field" x-show="localStudioProviderType==='openai'" x-cloak><span>API Token</span><input type="password" x-model="localStudioSettings.apiKey" @change="saveLocalStudioSettings()" placeholder="sk-... 或兼容服务 token"></label>
+          <div class="local-studio-size-note" x-show="localStudioProviderType==='google-ai-studio'" x-cloak>Google AI Studio 使用当前已登录账号，不需要配置 URL 或 token。</div>
+          <label class="local-studio-field"><span>Timeout</span><input type="number" min="1" max="600" step="1" x-model.number="localStudioSettings.timeout" @change="saveLocalStudioSettings()"></label>
+          <div class="local-studio-field">
+            <span>Interface</span>
+            <div class="cselect local-studio-select" :class="{open:openSelect==='localStudioInterfaceMode'}" @click.stop>
+              <div class="cselect-btn" @click="toggleSelect('localStudioInterfaceMode',$event)" tabindex="0"><span x-text="localStudioInterfaceModeLabel"></span><span class="arrow"></span></div>
+              <div class="cselect-menu">
+                <template x-for="option in interfaceModeOptions" :key="option.id"><div class="cselect-opt" :class="{active:localStudioInterfaceMode===option.id}" @click="selectLocalStudioInterfaceMode(option.id)" x-text="option.label"></div></template>
+              </div>
+            </div>
+          </div>
+          <div class="local-studio-field">
+            <span>Conversation Model</span>
+            <div class="cselect local-studio-select" :class="{open:openSelect==='localStudioModel'}" @click.stop>
+              <div class="cselect-btn" @click="toggleSelect('localStudioModel',$event)" tabindex="0"><span x-text="localStudioModelsLoading?'加载中':localStudioModel||'选择模型'"></span><span class="arrow"></span></div>
+              <div class="cselect-menu">
+                <template x-for="model in localStudioModelOptions" :key="model.id"><div class="cselect-opt" :class="{active:localStudioModel===model.id}" @click="localStudioModel=model.id;openSelect=null;saveLocalStudioSettings()" x-text="model.id"></div></template>
+                <div class="cselect-opt" aria-disabled="true" x-show="!localStudioModelOptions.length" x-text="localStudioModelsLoading?'模型加载中':'暂无对话模型'"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="local-studio-panel">
+          <div class="local-studio-pane-head"><div><div class="local-studio-kicker">Runtime</div><h2>运行</h2></div></div>
+          <div class="runtime-toggle" x-show="localStudioControlAvailable('stream')"><span>Stream</span><button type="button" :class="{active:localStudioStream==='on'}" @click="localStudioStream=localStudioStream==='on'?'off':'on';saveLocalStudioSettings()" x-text="localStudioStream==='on'?'开启':'关闭'"></button></div>
+          <div class="runtime-toggle" x-show="localStudioControlAvailable('search')"><span>Web search</span><button type="button" :class="{active:localStudioSearch==='on'}" @click="localStudioSearch=localStudioSearch==='on'?'off':'on';saveLocalStudioSettings()" x-text="localStudioSearch==='on'?'开启':'关闭'"></button></div>
+          <div class="capability-grid local-studio-capabilities">
+            <template x-for="item in [{key:'text',label:'文本',available:localStudioSelectedCaps.text_output!==false},{key:'files',label:'文件',available:localStudioControlAvailable('files')},{key:'thinking',label:'推理',available:localStudioControlAvailable('thinking')},{key:'stream',label:'流式',available:localStudioControlAvailable('stream')},{key:'tools',label:'工具',available:localStudioSelectedCaps.tools!==false},{key:'structured',label:'结构化',available:localStudioSelectedCaps.structured_output!==false}]" :key="item.key">
+              <div class="capability-chip" :class="{available:item.available}"><span x-text="item.label"></span><strong x-text="item.available?'可用':'不可用'"></strong></div>
+            </template>
+          </div>
+        </section>
+
+        <section class="local-studio-panel">
+          <div class="local-studio-pane-head"><div><div class="local-studio-kicker">Reasoning</div><h2>推理</h2></div></div>
+          <label class="local-studio-field"><span>Effort</span><select class="sel" x-model="localStudioReasoningEffort" :disabled="!localStudioControlAvailable('thinking')" @change="saveLocalStudioSettings()"><option value="off">off</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label>
+          <label class="local-studio-field"><span>Summary</span><select class="sel" x-model="localStudioReasoningSummary" :disabled="!localStudioControlAvailable('thinking')" @change="saveLocalStudioSettings()"><option value="auto">auto</option><option value="concise">concise</option><option value="detailed">detailed</option><option value="none">none</option></select></label>
+        </section>
+
+        <section class="local-studio-panel" x-show="localStudioInterfaceMode==='responses'" x-cloak>
+          <div class="local-studio-pane-head"><div><div class="local-studio-kicker" x-text="localStudioImageToolTitle"></div><h2 x-text="localStudioImageToolLabel"></h2></div><button type="button" class="request-switch" :class="{active:localStudioImageToolEnabled}" @click="localStudioImageToolEnabled=!localStudioImageToolEnabled;saveLocalStudioSettings()"><span class="request-switch-track"><span class="request-switch-knob"></span></span><strong x-text="localStudioImageToolEnabled?'开启':'关闭'"></strong></button></div>
+          <div class="local-studio-grid-controls">
+            <label class="local-studio-field"><span>Image Model</span><select class="sel" x-model="localStudioImageModel" @change="selectLocalStudioImageModel(localStudioImageModel)"><template x-for="model in localStudioImageModelOptions" :key="model.id"><option :value="model.id" x-text="model.id"></option></template></select></label>
+            <label class="local-studio-field"><span>Size</span><select class="sel" x-model="localStudioImageSize" @change="saveLocalStudioSettings()"><template x-for="option in localStudioSizeOptions" :key="option.size"><option :value="option.size" x-text="option.label+' · '+option.size"></option></template></select></label>
+            <label class="local-studio-field" x-show="localStudioImageSize==='custom'" x-cloak><span>Custom Size</span><input type="text" x-model="localStudioImageCustomSize" @change="saveLocalStudioSettings()" placeholder="2048x1152"></label>
+            <label class="local-studio-field" x-show="localStudioImageParamAvailable('quality')" x-cloak><span>Quality</span><select class="sel" x-model="localStudioImageQuality" @change="saveLocalStudioSettings()"><template x-for="value in localStudioImageParamValues('quality',['auto','low','medium','high'])" :key="value"><option :value="value" x-text="value"></option></template></select></label>
+            <label class="local-studio-field" x-show="localStudioImageParamAvailable('background')" x-cloak><span>Background</span><select class="sel" x-model="localStudioImageBackground" @change="saveLocalStudioSettings()"><template x-for="value in localStudioImageParamValues('background',['auto','transparent','opaque'])" :key="value"><option :value="value" x-text="value"></option></template></select></label>
+            <label class="local-studio-field" x-show="localStudioImageParamAvailable('output_format')" x-cloak><span>Format</span><select class="sel" x-model="localStudioImageFormat" @change="saveLocalStudioSettings()"><template x-for="value in localStudioImageParamValues('output_format',['png','jpeg','webp'])" :key="value"><option :value="value" x-text="value"></option></template></select></label>
+            <label class="local-studio-field" x-show="localStudioImageParamAvailable('output_compression')" x-cloak><span>Compression</span><input type="number" min="0" max="100" step="1" x-model.number="localStudioImageCompression" @change="saveLocalStudioSettings()"></label>
+          </div>
+          <div class="local-studio-size-note" x-text="localStudioImageToolNote"></div>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+  <!-- System Config -->
+  <div class="page-wrap config-page" :class="{active:view==='config'}">
+    <div class="scroll-area">
+      <div class="page-pad config-pad">
+        <div class="account-hero config-hero">
+          <div>
+            <div class="account-kicker">Configuration</div>
+            <h1>系统配置</h1>
+            <p x-text="configEnvFile?('配置文件：'+configEnvFile):'配置文件加载中'"></p>
+          </div>
+          <div class="account-hero-actions">
+            <button class="btn" :disabled="configLoading" @click="loadConfig(true)">
+              <svg viewBox="0 0 24 24" :class="{'spin':configLoading}"><path d="M21 12a9 9 0 11-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>
+              <span x-text="configLoading?'刷新中':'刷新'"></span>
+            </button>
+          </div>
+        </div>
+
+        <div class="notice notice-error config-notice" x-show="configError" x-text="configError" x-cloak></div>
+
+        <div class="config-metrics">
+          <div class="account-metric"><span>可配置项</span><strong x-text="configItemCount"></strong></div>
+          <div class="account-metric"><span>已写入 .env</span><strong x-text="configOverriddenCount"></strong></div>
+          <div class="account-metric"><span>等待重启</span><strong :class="{'metric-warn':configPendingRestartCount}" x-text="configPendingRestartCount"></strong></div>
+        </div>
+
+        <template x-for="group in configGroups" :key="group.id">
+          <section class="account-panel config-panel">
+            <div class="account-panel-head config-panel-head">
+              <div>
+                <h2 x-text="group.label"></h2>
+                <p x-text="(group.items||[]).length+' 项' "></p>
+              </div>
+            </div>
+            <div class="config-list">
+              <template x-for="item in group.items" :key="item.key">
+                <div class="config-row" :class="{dirty:configItemDirty(item),pending:item.pending_restart}">
+                  <div class="config-info-block">
+                    <div class="config-label-row">
+                      <strong x-text="item.label"></strong>
+                      <span class="badge badge-green" x-show="item.is_overridden" x-cloak>.env</span>
+                      <span class="badge badge-red" x-show="item.pending_restart" x-cloak>需重启</span>
+                    </div>
+                    <code x-text="item.key"></code>
+                    <p x-text="item.description"></p>
+                    <div class="config-meta">
+                      <span>当前 <strong x-text="configFormatValue(item.current_value,item.type)"></strong></span>
+                      <span>默认 <strong x-text="configFormatValue(item.default_value,item.type)"></strong></span>
+                    </div>
+                    <div class="notice notice-error" x-show="!!item.configured_error" x-text="item.configured_error?'已保存值无效：'+item.configured_error:''" x-cloak></div>
+                  </div>
+                  <div class="config-control-block">
+                    <template x-if="item.type==='bool'">
+                      <button type="button" class="request-switch config-toggle" :class="{active:configBooleanDraft(item)}" :disabled="item.saving" @click="item.draft=!configBooleanDraft(item);saveConfigItem(item)">
+                        <span class="request-switch-track"><span class="request-switch-knob"></span></span>
+                        <strong x-text="configBooleanDraft(item)?'开启':'关闭'"></strong>
+                      </button>
+                    </template>
+                    <template x-if="item.type!=='bool'">
+                      <input class="config-input" :type="configInputType(item)" :min="item.minimum??null" :max="item.maximum??null" :step="configInputStep(item)" x-model="item.draft" @keydown.enter.prevent="saveConfigItem(item)">
+                    </template>
+                    <div class="config-actions">
+                      <button class="btn btn-sm btn-primary" :disabled="item.saving||!configItemDirty(item)" @click="saveConfigItem(item)">
+                        <svg viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/></svg>
+                        <span x-text="item.saving?'保存中':'保存'"></span>
+                      </button>
+                      <button class="btn btn-sm" :disabled="item.saving||!item.is_overridden" @click="resetConfigItem(item)">重置</button>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </section>
+        </template>
+
+        <div class="account-empty" x-show="!configLoading&&!configGroups.length" x-cloak>暂无可配置项</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Images -->
+  <div class="page-wrap image-page" :class="{active:view==='images'}">
+    <div class="scroll-area">
+      <div class="page-pad image-pad image-studio-pad">
+        <div class="image-studio-header">
+          <div>
+            <div class="image-kicker">引导式 Studio</div>
+            <h1>图片生成</h1>
+          </div>
+          <div class="image-status-strip">
+            <span class="image-status-pill" :class="{'is-editing':imageReferenceCount}" x-text="imageReferenceCount?'编辑模式':'生成模式'"></span>
+            <span class="image-status-pill" x-text="interfaceModeLabel||'OpenAI 兼容'">OpenAI 兼容</span>
+            <span class="image-status-pill" x-text="imageModel||'未选择模型'">未选择模型</span>
+            <span class="image-status-pill" x-text="imageRunSummary"></span>
+          </div>
+        </div>
+        <div class="image-workspace image-studio-grid">
+          <section class="image-panel image-form-panel image-studio-compose">
+            <div class="studio-step studio-step-prompt">
+              <div class="studio-step-head">
+                <span class="studio-step-index">1</span>
+                <div>
+                  <h2>描述画面</h2>
+                  <p>写清主体、风格、光线和构图，可先套用模板再优化提示词。</p>
+                </div>
+              </div>
+              <div class="image-style-row">
+                <div class="image-control">
+                  <div class="control-label">风格模板</div>
+                  <div class="cselect image-select" :class="{open:openSelect==='imageStyleTemplate'}" @click.stop>
+                    <div class="cselect-btn" @click="toggleSelect('imageStyleTemplate',$event)" tabindex="0"><span x-text="imageStyleLabel"></span><span class="arrow"></span></div>
+                    <div class="cselect-menu image-style-menu">
+                      <template x-for="template in imageStyleTemplates" :key="template.id">
+                        <div class="cselect-opt image-style-option" :class="{active:imageStyleTemplate===template.id}" @click="selectImageStyleTemplate(template.id)">
+                          <span x-text="template.label"></span><small x-text="template.desc"></small>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                  <div class="control-hint" x-text="imageStyleHint"></div>
+                </div>
+              </div>
+              <textarea class="image-prompt" x-model="imagePrompt" @input="imagePromptChanged()" placeholder="例如：一张干净的产品海报，玻璃杯放在浅灰色石材台面上，自然侧光，背景有少量绿植虚化" rows="7"></textarea>
+              <div class="image-prompt-footer">
+                <span x-text="imagePrompt.trim()?imagePrompt.trim().length+' 字':'等待输入提示词'"></span>
+                <span x-text="imageStyleTemplate==='none'?'无模板':imageStyleLabel"></span>
+              </div>
+              <div class="image-prompt-optimizer">
+                <div class="optimizer-head">
+                  <div>
+                    <div class="image-section-label">Prompt Optimizer</div>
+                    <h3>提示词优化</h3>
+                  </div>
+                  <button class="btn btn-sm btn-primary" :disabled="!imagePromptOptimizeCanSubmit" @click="optimizeImagePrompt()" x-text="imagePromptOptimizing?'优化中':'优化提示词'"></button>
+                </div>
+                <div class="optimizer-controls">
+                  <div class="image-control">
+                    <div class="control-label">优化模型</div>
+                    <div class="cselect image-select" :class="{open:openSelect==='imagePromptOptimizerModel'}" @click.stop>
+                      <div class="cselect-btn" @click="toggleSelect('imagePromptOptimizerModel',$event)" tabindex="0"><span x-text="imagePromptOptimizerModel||'选择模型'">选择模型</span><span class="arrow"></span></div>
+                      <div class="cselect-menu">
+                        <template x-for="m in textModels" :key="m.id"><div class="cselect-opt" :class="{active:imagePromptOptimizerModel===m.id}" @click="selectPromptOptimizerModel(m.id)" x-text="m.id"></div></template>
+                        <div class="cselect-opt" aria-disabled="true" x-show="!textModels.length">暂无文本模型</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="image-control">
+                    <div class="control-label">思考</div>
+                    <div class="cselect image-select" :class="{open:openSelect==='imagePromptOptimizerThinking'}" @click.stop>
+                      <div class="cselect-btn" @click="toggleSelect('imagePromptOptimizerThinking',$event)" tabindex="0"><span x-text="!promptOptimizerSupportsThinking?'不支持':imagePromptOptimizerThinking==='off'?'关闭':imagePromptOptimizerThinking==='low'?'低':imagePromptOptimizerThinking==='medium'?'中':imagePromptOptimizerThinking==='high'?'高':imagePromptOptimizerThinking"></span><span class="arrow"></span></div>
+                      <div class="cselect-menu">
+                        <template x-for="v in ['off','low','medium','high']" :key="v"><div class="cselect-opt" :class="{active:imagePromptOptimizerThinking===v}" :aria-disabled="(!promptOptimizerSupportsThinking&&v!=='off').toString()" @click="setPromptOptimizerThinking(v)" x-text="v==='off'?'关闭':v==='low'?'低':v==='medium'?'中':v==='high'?'高':v"></div></template>
+                      </div>
+                    </div>
+                    <div class="control-hint" x-text="promptOptimizerSupportsThinking?'按当前接口能力发送 thinking':'当前接口不支持思考'"></div>
+                  </div>
+                </div>
+                <div class="notice notice-error image-prompt-optimize-error" x-show="imagePromptOptimizeError" x-text="imagePromptOptimizeError" x-cloak></div>
+                <div class="prompt-option-list" x-show="imagePromptOptions.length" x-cloak>
+                  <template x-for="(option,index) in imagePromptOptions" :key="option.title+index">
+                    <div class="prompt-option-card">
+                      <div class="prompt-option-meta"><span x-text="'版本 '+(index+1)"></span><strong x-text="option.title"></strong></div>
+                      <p x-text="option.special"></p>
+                      <div class="prompt-option-text" x-text="option.prompt"></div>
+                      <button class="btn btn-sm" :disabled="imageBusy" @click="applyImagePromptOption(option)">应用此版本</button>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </div>
+
+            <div class="studio-step">
+              <div class="studio-step-head">
+                <span class="studio-step-index">2</span>
+                <div>
+                  <h2>加入素材</h2>
+                  <p>参考图影响风格与内容，基图用于下一轮编辑。</p>
+                </div>
+              </div>
+              <div class="image-session-tools image-studio-tools">
+                <input x-ref="imageReferenceInput" type="file" accept="image/*" multiple hidden @change="attachImageReferences($event)">
+                <button class="btn btn-sm" :disabled="imageBusy" @click="$refs.imageReferenceInput.click()">上传参考</button>
+              </div>
+              <div class="notice notice-error image-reference-error" x-show="imageReferenceError" x-text="imageReferenceError" x-cloak></div>
+              <div class="image-reference-zone image-reference-board" x-show="imageBaseImage||imageReferences.length" x-cloak>
+                <template x-if="imageBaseImage">
+                  <div class="image-ref-thumb image-ref-base">
+                    <img :src="imageUrl(imageBaseImage)" :alt="imageBaseImage.prompt||'base image'">
+                    <span>基图</span>
+                    <button class="thumb-remove" :disabled="imageBusy" @click="clearBaseImage()" title="移除基图">×</button>
+                  </div>
+                </template>
+                <template x-for="(item,index) in imageReferences" :key="imageReferenceKey(item)||index">
+                  <div class="image-ref-thumb">
+                    <img :src="imageUrl(item)" :alt="item.prompt||item.name||'reference image'">
+                    <span>参考</span>
+                    <button class="thumb-remove" :disabled="imageBusy" @click="removeImageReference(index)" title="移除参考图">×</button>
+                  </div>
+                </template>
+              </div>
+              <div class="image-reference-empty" x-show="!imageBaseImage&&!imageReferences.length">
+                可跳过素材直接生成，也可以从下方历史选择图片加入参考。
+              </div>
+            </div>
+
+            <div class="studio-step">
+              <div class="studio-step-head">
+                <span class="studio-step-index">3</span>
+                <div>
+                  <h2>选择参数</h2>
+                  <p>接口能力会自动决定可用尺寸、数量和响应格式。</p>
+                </div>
+              </div>
+              <div class="image-controls image-studio-controls">
+                <div class="image-control image-model-control">
+                  <div class="control-label">模型</div>
+                  <div class="model-picker-row image-model-picker-row">
+                    <div class="cselect image-select" :class="{open:openSelect==='imageModel'}" @click.stop>
+                      <div class="cselect-btn" @click="toggleSelect('imageModel',$event)" tabindex="0"><span x-text="modelsLoading?'加载模型中':imageModel||'选择模型'">选择模型</span><span class="arrow"></span></div>
+                      <div class="cselect-menu">
+                        <template x-for="m in imageModels" :key="m.id"><div class="cselect-opt" :class="{active:imageModel===m.id}" @click="selectImageModel(m.id)" x-text="m.id"></div></template>
+                        <div class="cselect-opt" aria-disabled="true" x-show="!imageModels.length" x-text="modelsLoading?'模型加载中':'暂无图像模型'"></div>
+                      </div>
+                    </div>
+                    <button type="button" class="icon-btn model-refresh-btn" :disabled="modelsLoading" @click="refreshModels()" :title="modelsLoading?'刷新中':'刷新模型列表'" :aria-label="modelsLoading?'刷新中':'刷新模型列表'">
+                      <svg viewBox="0 0 24 24" :class="{'spin':modelsLoading}"><path d="M21 12a9 9 0 11-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="image-control">
+                  <div class="control-label">尺寸</div>
+                  <div class="cselect image-select" :class="{open:openSelect==='imageSize'}" @click.stop>
+                    <div class="cselect-btn" @click="toggleSelect('imageSize',$event)" tabindex="0"><span x-text="imageSize"></span><span class="arrow"></span></div>
+                    <div class="cselect-menu">
+                      <template x-for="s in imageSizes" :key="s.size"><div class="cselect-opt" :class="{active:imageSize===s.size}" @click="imageSize=s.size;openSelect=null"><span x-text="s.size"></span><span class="opt-muted" x-text="s.aspect_ratio"></span></div></template>
+                    </div>
+                  </div>
+                </div>
+                <div class="image-control image-count-control">
+                  <div class="control-label">数量</div>
+                  <input class="image-count" type="number" :min="imageCountMin" :max="imageCountMax" step="1" x-model.number="imageCount" @change="normalizeImageCount()">
+                  <div class="control-hint" x-text="imageCountHint"></div>
+                </div>
+                <div class="image-control image-timeout-control">
+                  <div class="control-label">超时秒数</div>
+                  <input class="image-count" type="number" min="1" step="1" placeholder="默认" x-model="imageTimeout" @change="normalizeImageTimeout()">
+                  <div class="control-hint" x-text="imageTimeoutSummary"></div>
+                </div>
+                <div class="image-control">
+                  <div class="control-label">响应格式</div>
+                  <div class="image-param-value" x-text="imageResponseFormat"></div>
+                  <div class="control-hint" x-text="imageFormatLabel"></div>
+                </div>
+              </div>
+              <div class="notice notice-error image-inline-notice" x-show="modelError" x-text="modelError" x-cloak></div>
+            </div>
+
+            <div class="studio-step studio-submit-step">
+              <div class="studio-step-head">
+                <span class="studio-step-index">4</span>
+                <div>
+                  <h2>生成并迭代</h2>
+                  <p x-text="imageSubmitHint"></p>
+                </div>
+              </div>
+              <div class="image-submit-row">
+                <button class="btn btn-primary image-generate-btn" :disabled="!imageCanSubmit" @click="generateImage()" x-text="imageActionLabel"></button>
+                <button class="btn" :disabled="imageBusy||!imageLastRequest" @click="retryLastImage()">重试上次</button>
+              </div>
+              <div class="notice notice-error image-error" x-show="imageError" x-cloak>
+                <span x-text="imageError"></span>
+                <button class="btn btn-sm" :disabled="imageBusy||!imageLastRequest" @click="retryLastImage()">重试</button>
+              </div>
+            </div>
+          </section>
+
+          <div class="image-main-column">
+            <section class="image-panel image-results-panel">
+            <div class="image-panel-head image-results-head">
+              <div>
+                <div class="image-section-label">当前输出</div>
+                <h2>结果</h2>
+              </div>
+              <span class="panel-meta" x-text="imageResults.length?imageResults.length+' 张':imageBusy?'处理中':''"></span>
+            </div>
+            <div class="image-gallery image-result-gallery" x-show="imageResults.length" x-cloak>
+              <template x-for="item in imageResults" :key="item.url||item.index">
+                <div class="image-card image-result-card">
+                  <button type="button" class="image-thumb" @click="openImagePreview(item)" title="预览图片">
+                    <img :src="imageUrl(item)" :alt="item.prompt||'generated image'">
+                  </button>
+                  <div class="image-card-body">
+                    <div class="image-card-title" x-text="item.prompt"></div>
+                    <div class="image-card-meta" x-text="item.model+' · '+item.size"></div>
+                    <div class="image-card-actions">
+                      <button class="btn btn-sm" @click="downloadImage(item)">下载</button>
+                      <button class="btn btn-sm" @click="setBaseImage(item)">设为基图</button>
+                      <button class="btn btn-sm" @click="pinImageReference(item,'result')">作参考</button>
+                      <button class="btn btn-sm" @click="retryImage(item)">重试</button>
+                      <button class="btn btn-sm btn-danger-outline" :disabled="imageHistoryDeleting" @click="deleteHistoryImage(item)">删除</button>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+            <div class="image-empty image-empty-state" x-show="!imageResults.length&&!imageBusy">
+              <div class="image-empty-mark">IMG</div>
+              <h3>结果会显示在这里</h3>
+              <p>完成左侧 4 步后生成。生成后的图片可以下载、设为基图、加入参考或继续重试。</p>
+            </div>
+            <div class="image-empty image-busy-state" x-show="imageBusy">
+              <div class="image-spinner"></div>
+              <h3 x-text="imageReferenceCount?'正在编辑图片':'正在生成图片'"></h3>
+              <p x-text="imageRunSummary"></p>
+            </div>
+            </section>
+
+            <section class="image-panel image-history-panel">
+              <div class="image-panel-head">
+                <div>
+                  <div class="image-section-label">素材库</div>
+                  <h2>本地历史</h2>
+                </div>
+                <span class="panel-meta" x-text="selectedHistoryCount?selectedHistoryCount+' 已选':imageHistory.length?imageHistory.length+' 张':''"></span>
+              </div>
+              <div class="image-history-tools" x-show="imageHistory.length" x-cloak>
+                <button class="btn btn-sm" :disabled="imageHistoryDeleting" @click="allHistorySelected?clearImageSelection():selectAllImageHistory()" x-text="allHistorySelected?'清除选择':'全选'"></button>
+                <button class="btn btn-sm" :disabled="!selectedHistoryCount||imageBusy" @click="pinSelectedHistory()">加入参考</button>
+                <button class="btn btn-sm" :disabled="!selectedHistoryCount||imageHistoryDeleting" @click="downloadSelectedImages()">下载所选</button>
+                <button class="btn btn-sm btn-danger-outline" :disabled="!selectedHistoryCount||imageHistoryDeleting" @click="deleteSelectedImages()" x-text="imageHistoryDeleting?'删除中':'删除所选'"></button>
+                <button class="btn btn-sm" :disabled="!imageHistory.length||imageHistoryDeleting" @click="clearImageHistory()">清空</button>
+              </div>
+              <div class="notice notice-error image-history-error" x-show="imageHistoryError" x-text="imageHistoryError" x-cloak></div>
+              <div class="image-gallery history-gallery" x-show="imageHistory.length" x-cloak>
+                <template x-for="item in imageHistory" :key="historyItemId(item)">
+                  <div class="image-card image-card-compact image-history-card" :class="{selected:isHistorySelected(item)}">
+                    <label class="image-select-check" @click.stop>
+                      <input type="checkbox" :checked="isHistorySelected(item)" @change="toggleHistorySelection(item)">
+                      <span></span>
+                    </label>
+                    <button type="button" class="image-thumb" @click="openImagePreview(item)" title="预览图片">
+                      <img :src="imageUrl(item)" :alt="item.prompt||'history image'">
+                    </button>
+                    <div class="image-card-body">
+                      <div class="image-card-title" x-text="item.prompt"></div>
+                      <div class="image-card-meta" x-text="item.model+' · '+item.size+' · '+fmtImageTime(item.created)"></div>
+                      <div class="image-card-actions">
+                        <button class="btn btn-sm" @click="downloadImage(item)">下载</button>
+                        <button class="btn btn-sm" @click="setBaseImage(item)">设为基图</button>
+                        <button class="btn btn-sm" @click="pinImageReference(item,'history')">作参考</button>
+                        <button class="btn btn-sm" @click="retryImage(item)">重试</button>
+                        <button class="btn btn-sm btn-danger-outline" :disabled="imageHistoryDeleting" @click="deleteHistoryImage(item)">删除</button>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+              </div>
+              <div class="image-empty image-compact-empty" x-show="!imageHistory.length">生成后的图片会自动进入本地历史。</div>
+            </section>
+          </div>
+
+          <div class="image-side-column">
+            <section class="image-panel image-session-panel">
+            <div class="image-panel-head">
+              <div>
+                <div class="image-section-label">上下文</div>
+                <h2>编辑会话</h2>
+              </div>
+              <div class="image-panel-actions">
+                <span class="panel-meta" x-text="imageConversation.length?Math.ceil(imageConversation.length/2)+' 轮':''"></span>
+                <button class="btn btn-sm btn-primary image-new-session-btn" :disabled="imageBusy||(!imageBaseImage&&!imageReferences.length&&!imageConversation.length)" @click="clearImageEditSession()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg><span>新会话</span></button>
+              </div>
+            </div>
+            <div class="image-session-log" x-show="imageConversation.length" x-cloak>
+              <template x-for="(turn,index) in imageConversation" :key="index">
+                <div class="image-turn" :class="turn.role==='assistant'?'image-turn-ai':'image-turn-user'">
+                  <div class="image-turn-role" x-text="turn.role==='assistant'?'AI':'你'"></div>
+                  <div class="image-turn-body">
+                    <div class="image-turn-text" x-show="turn.prompt" x-text="turn.prompt"></div>
+                    <div class="image-turn-images" x-show="turn.images&&turn.images.length" x-cloak>
+                      <template x-for="item in turn.images" :key="imageReferenceKey(item)||imageUrl(item)">
+                        <img :src="imageUrl(item)" :alt="item.prompt||'session image'">
+                      </template>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+            <div class="image-empty image-compact-empty" x-show="!imageConversation.length">
+              首次生成后会记录提示词和输出，便于继续编辑。
+            </div>
+            </section>
+
+            <section class="image-panel image-sessions-panel">
+            <div class="image-panel-head">
+              <div>
+                <div class="image-section-label">会话历史</div>
+                <h2>已保存会话</h2>
+              </div>
+              <span class="panel-meta" x-text="imageSessionSaving?'保存中':imageSessions.length?imageSessions.length+' 个':''"></span>
+            </div>
+            <div class="notice notice-error image-session-error" x-show="imageSessionError" x-text="imageSessionError" x-cloak></div>
+            <div class="image-session-history" x-show="imageSessions.length" x-cloak>
+              <template x-for="session in imageSessions" :key="session.id">
+                <div class="image-session-card" :class="{active:activeImageSessionId===session.id}">
+                  <button type="button" class="image-session-main" :disabled="imageBusy" @click="restoreImageSession(session)">
+                    <div class="image-session-preview" :class="{'is-empty':!session.preview_url}">
+                      <img x-show="session.preview_url" :src="session.preview_url" :alt="session.title||'session preview'">
+                      <span x-show="!session.preview_url">IMG</span>
+                    </div>
+                    <div class="image-session-copy">
+                      <div class="image-session-title" x-text="session.title"></div>
+                      <div class="image-session-meta" x-text="imageSessionMeta(session)"></div>
+                      <div class="image-session-time" x-text="fmtImageTime(session.updated_at)"></div>
+                    </div>
+                  </button>
+                  <button class="btn btn-sm btn-danger-outline" :disabled="imageSessionDeletingId===session.id" @click="deleteImageSession(session)" x-text="imageSessionDeletingId===session.id?'删除中':'删除'"></button>
+                </div>
+              </template>
+            </div>
+            <div class="image-empty image-compact-empty" x-show="!imageSessions.length&&!imageSessionLoading">生成成功后会自动保存到后端会话历史。</div>
+            <div class="image-empty image-compact-empty" x-show="imageSessionLoading">正在加载会话历史...</div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Request logs -->
+  <div class="page-wrap request-page" :class="{active:view==='requests'}">
+    <div class="scroll-area">
+      <div class="page-pad request-pad">
+        <div class="request-hero">
+          <div>
+            <div class="account-kicker">AI Studio Requests</div>
+            <h1>请求记录</h1>
+            <p><span x-text="requestLogEnabled?'保存已开启':'保存已关闭'"></span><span> · </span><span x-text="requestLogTotal+' 个完整请求'"></span><span> · </span><span x-text="requestLogEntryTotal+' 条阶段记录'"></span></p>
+          </div>
+          <div class="request-hero-actions">
+            <button type="button" class="request-switch" :class="{active:requestLogEnabled}" :disabled="requestLogSaving" @click="toggleRequestLogging()" :aria-pressed="requestLogEnabled.toString()">
+              <span class="request-switch-track"><span class="request-switch-knob"></span></span>
+              <strong x-text="requestLogEnabled?'保存开启':'保存关闭'"></strong>
+            </button>
+            <button class="btn" :disabled="requestLogLoading" @click="refreshRequestLogs()" x-text="requestLogLoading?'刷新中':'刷新列表'"></button>
+          </div>
+        </div>
+
+        <div class="request-metrics">
+          <div class="account-metric"><span>开关</span><strong x-text="requestLogEnabled?'On':'Off'"></strong></div>
+          <div class="account-metric"><span>完整请求</span><strong x-text="requestLogTotal"></strong></div>
+          <div class="account-metric"><span>已选</span><strong x-text="selectedRequestLogCount"></strong></div>
+          <div class="account-metric metric-wide"><span>当前请求</span><strong x-text="activeRequestLogId||'未选择'"></strong></div>
+        </div>
+
+        <div class="notice notice-error request-notice" x-show="requestLogError" x-cloak x-text="requestLogError"></div>
+
+        <div class="request-workspace">
+          <section class="account-panel request-list-panel">
+            <div class="account-panel-head">
+              <div><h2>完整请求</h2><p x-text="requestLogLoading?'加载中':requestLogs.length+' 个最近请求组'"></p></div>
+              <div class="request-panel-actions">
+                <button class="btn btn-sm" :disabled="!requestLogs.length||requestLogLoading" @click="allRequestLogsSelected?clearRequestLogSelection():selectAllRequestLogs()" x-text="allRequestLogsSelected?'清除选择':'全选'"></button>
+                <button class="btn btn-sm" :disabled="!selectedRequestLogCount||requestLogExporting" @click="exportSelectedRequestLogs()" x-text="requestLogExporting?'导出中':'导出所选'"></button>
+                <button class="btn btn-sm btn-danger-outline" :disabled="!selectedRequestLogCount||requestLogDeleting" @click="deleteSelectedRequestLogs()" x-text="requestLogDeleting?'删除中':'删除所选'"></button>
+              </div>
+            </div>
+            <div class="request-log-list" x-show="requestLogs.length" x-cloak>
+              <template x-for="item in requestLogs" :key="item.id">
+                <div class="request-log-item" :class="{active:activeRequestLogId===requestLogGroupId(item),selected:isRequestLogSelected(item)}">
+                  <label class="request-log-check" @click.stop>
+                    <input type="checkbox" :checked="isRequestLogSelected(item)" @change="toggleRequestLogSelection(item,$event)">
+                  </label>
+                  <button type="button" class="request-log-main" @click="selectRequestLog(item)">
+                    <span class="request-log-row"><strong x-text="requestLogTitle(item)"></strong><span x-text="requestLogTimeline(item)"></span></span>
+                    <span class="request-log-url" x-text="requestLogUrlPath(item.url)"></span>
+                    <span class="request-log-meta" x-text="requestLogMeta(item)"></span>
+                    <span class="request-log-phases">
+                      <template x-for="phase in item.phases||[]" :key="phase.id">
+                        <span x-text="requestLogKindLabel(phase.kind,phase.phase)"></span>
+                      </template>
+                    </span>
+                  </button>
+                </div>
+              </template>
+            </div>
+            <div class="account-empty request-empty" x-show="!requestLogs.length&&!requestLogLoading">暂无请求记录</div>
+          </section>
+
+          <section class="account-panel request-detail-panel">
+            <div class="account-panel-head request-detail-head">
+              <div><h2>请求详情</h2><p x-text="requestLogDetailLoading?'加载中':activeRequestLogId||'未选择请求'"></p></div>
+              <div class="request-panel-actions">
+                <button class="btn btn-sm" :disabled="!activeRequestLog" @click="writeClipboard(requestFullJson())">复制完整 JSON</button>
+                <button class="btn btn-sm" :disabled="!activeRequestLog||requestLogExporting" @click="exportActiveRequestLog()">导出当前</button>
+                <button class="btn btn-sm btn-danger-outline" :disabled="!activeRequestLog||requestLogDeleting" @click="deleteActiveRequestLog()">删除当前</button>
+              </div>
+            </div>
+            <div class="request-detail-empty" x-show="!activeRequestLog&&!requestLogDetailLoading">选择左侧请求后查看完整内容</div>
+            <div class="request-detail" x-show="activeRequestLog" x-cloak>
+              <div class="request-detail-grid">
+                <div><span>开始</span><strong x-text="fmtDate(activeRequestLog?.created_at)"></strong></div>
+                <div><span>结束</span><strong x-text="fmtDate(activeRequestLog?.updated_at)"></strong></div>
+                <div><span>阶段</span><strong x-text="activeRequestLog?.entry_count||requestLogEntries().length"></strong></div>
+                <div><span>模型</span><strong x-text="activeRequestLog?.model||'-'"></strong></div>
+                <div><span>方法</span><strong x-text="activeRequestLog?.method||'POST'"></strong></div>
+                <div><span>状态</span><strong x-text="activeRequestLog?.status_code||'-'"></strong></div>
+                <div><span>链路</span><strong x-text="activeRequestLog?.chain_id||'-'"></strong></div>
+                <div><span>大小</span><strong x-text="fileSizeLabel(activeRequestLog?.total_size??((activeRequestLog?.body_size||0)+(activeRequestLog?.response_body_size||0)))"></strong></div>
+              </div>
+
+              <div class="request-section">
+                <h3>入口 URL</h3>
+                <pre class="request-raw" x-text="activeRequestLog?.url||''"></pre>
+              </div>
+
+              <div class="request-section">
+                <h3>生命周期阶段</h3>
+                <div class="request-phase-list">
+                  <template x-for="entry in requestLogEntries()" :key="entry.id">
+                    <article class="request-phase-card">
+                      <header class="request-phase-head">
+                        <div><strong x-text="requestLogKindLabel(entry.kind,entry.phase)"></strong><span x-text="entry.id"></span></div>
+                        <span x-text="requestPhaseMeta(entry)"></span>
+                      </header>
+
+                      <div class="request-detail-grid request-phase-grid">
+                        <div><span>时间</span><strong x-text="fmtDate(entry.created_at)"></strong></div>
+                        <div><span>模型</span><strong x-text="entry.model||'-'"></strong></div>
+                        <div><span>传输</span><strong x-text="entry.transport||'-'"></strong></div>
+                        <div><span>方法</span><strong x-text="entry.method||'POST'"></strong></div>
+                        <div><span>状态</span><strong x-text="entry.status_code||'-'"></strong></div>
+                        <div><span>大小</span><strong x-text="fileSizeLabel((entry.body_size||0)+(entry.response_body_size||0))"></strong></div>
+                      </div>
+
+                      <div class="request-section">
+                        <h3>URL</h3>
+                        <pre class="request-raw" x-text="entry.url||''"></pre>
+                      </div>
+
+                      <div class="request-section">
+                        <h3>发送 Headers</h3>
+                        <div class="request-header-table">
+                          <template x-for="row in requestHeaderRows(entry,'headers')" :key="row.name">
+                            <div><span x-text="row.name"></span><code x-text="row.value"></code></div>
+                          </template>
+                        </div>
+                      </div>
+
+                      <div class="request-section">
+                        <h3>捕获 Headers</h3>
+                        <div class="request-header-table">
+                          <template x-for="row in requestHeaderRows(entry,'captured_headers')" :key="row.name">
+                            <div><span x-text="row.name"></span><code x-text="row.value"></code></div>
+                          </template>
+                        </div>
+                      </div>
+
+                      <div class="request-section" x-show="entry.body_json!==undefined&&entry.body_json!==null">
+                        <h3>Body JSON</h3>
+                        <pre class="request-code" x-text="jsonPretty(entry.body_json)"></pre>
+                      </div>
+
+                      <div class="request-section" x-show="entry.body_parse_error">
+                        <h3>Body 解析错误</h3>
+                        <pre class="request-raw" x-text="entry.body_parse_error"></pre>
+                      </div>
+
+                      <div class="request-section">
+                        <h3>Body 原文</h3>
+                        <pre class="request-code" x-text="entry.body_raw||''"></pre>
+                      </div>
+
+                      <div class="request-section" x-show="entry.response_headers">
+                        <h3>响应 Headers</h3>
+                        <div class="request-header-table">
+                          <template x-for="row in requestHeaderRows(entry,'response_headers')" :key="row.name">
+                            <div><span x-text="row.name"></span><code x-text="row.value"></code></div>
+                          </template>
+                        </div>
+                      </div>
+
+                      <div class="request-section" x-show="entry.response_body_json!==undefined&&entry.response_body_json!==null">
+                        <h3>响应 Body JSON</h3>
+                        <pre class="request-code" x-text="jsonPretty(entry.response_body_json)"></pre>
+                      </div>
+
+                      <div class="request-section" x-show="entry.response_body_parse_error">
+                        <h3>响应 Body 解析错误</h3>
+                        <pre class="request-raw" x-text="entry.response_body_parse_error"></pre>
+                      </div>
+
+                      <div class="request-section" x-show="entry.response_body_raw!==undefined">
+                        <h3>响应 Body 原文</h3>
+                        <pre class="request-code" x-text="entry.response_body_raw||''"></pre>
+                      </div>
+                    </article>
+                  </template>
+                </div>
+              </div>
+
+              <div class="request-section">
+                <h3>完整记录</h3>
+                <pre class="request-code" x-text="requestFullJson()"></pre>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Accounts -->
+  <div class="page-wrap" :class="{active:view==='accounts'}">
+    <div class="scroll-area">
+      <div class="page-pad account-pad">
+        <div class="account-hero">
+          <div>
+            <div class="account-kicker">账号池</div>
+            <h1>账号管理</h1>
+            <p x-text="rotationHint(rotationMode)"></p>
+          </div>
+          <div class="account-hero-actions">
+            <button class="btn" :disabled="forcingNext" @click="forceNext()" x-text="forcingNext?'切换中':'强制切换'"></button>
+            <button class="btn btn-primary" :disabled="loginBusy" @click="addAccount()" x-text="loginBusy?'登录中...':'登录账号'"></button>
+          </div>
+        </div>
+
+        <div class="account-metrics">
+          <div class="account-metric metric-wide"><span>当前激活</span><strong x-text="activeLabel"></strong></div>
+          <div class="account-metric"><span>账号</span><strong x-text="accountCount"></strong></div>
+          <div class="account-metric"><span>健康</span><strong x-text="healthyAccountCount"></strong></div>
+          <div class="account-metric"><span>Pro/Ultra</span><strong x-text="premiumAccountCount"></strong></div>
+          <div class="account-metric"><span>冷却/异常</span><strong class="metric-warn" x-text="coolingAccountCount"></strong></div>
+          <div class="account-metric"><span>账号负载</span><strong x-text="totalAffinityLoad"></strong></div>
+          <div class="account-metric"><span>图片使用</span><strong x-text="totalAccountImageUsage"></strong></div>
+        </div>
+
+        <div class="notice-stack" x-show="loginSession.status||accountsError||activeAccountNote||rotationError" x-cloak>
+          <div class="notice" :class="loginStatusClass()" x-show="loginSession.status">
+            <div class="notice-main"><span class="notice-title">登录会话</span><span x-text="loginStatusText()"></span><span class="notice-id" x-show="loginSession.id" x-text="loginSession.id"></span></div>
+            <div class="notice-detail" x-show="loginSession.email" x-text="loginSession.email"></div>
+            <div class="notice-detail" x-show="loginSession.error" x-text="loginSession.error"></div>
+          </div>
+          <div class="notice notice-error" x-show="accountsError" x-text="accountsError"></div>
+          <div class="notice notice-info" x-show="activeAccountNote" x-text="activeAccountNote"></div>
+          <div class="notice notice-error" x-show="rotationError" x-text="rotationError"></div>
+        </div>
+
+        <div class="account-control-row">
+          <section class="account-panel rotation-panel">
+            <div class="account-panel-head">
+              <div><h2>轮换策略</h2><p x-text="rotationHint(rotCfg.mode)"></p></div>
+              <span class="account-mode-pill" x-text="rotationLabel(rotationMode)"></span>
+            </div>
+            <div class="rotation-options">
+              <template x-for="v in ['exhaustion','round_robin','lru','least_rl']" :key="v">
+                <button type="button" class="rotation-option" :class="{active:rotCfg.mode===v}" @click="rotCfg.mode=v">
+                  <strong x-text="rotationLabel(v)"></strong>
+                  <span x-text="rotationHint(v)"></span>
+                </button>
+              </template>
+            </div>
+            <div class="rotation-footer">
+              <label class="account-field"><span>冷却秒数</span><input type="number" x-model.number="rotCfg.cooldown" min="0"></label>
+              <button class="btn btn-primary" :disabled="savingRotation" @click="saveRotation()" x-text="savingRotation?'保存中':'保存策略'"></button>
+            </div>
+          </section>
+
+          <section class="account-panel usage-panel">
+            <div class="account-panel-head"><div><h2>图片分辨率</h2><p>按成功生成图片数量统计</p></div></div>
+            <div class="usage-bars" x-show="accountImageSizeTotals.length" x-cloak>
+              <template x-for="([size,count]) in accountImageSizeTotals" :key="size">
+                <div class="usage-bar"><span x-text="size"></span><strong x-text="count"></strong></div>
+              </template>
+            </div>
+            <div class="account-empty" x-show="!accountImageSizeTotals.length">暂无图片使用记录</div>
+          </section>
+        </div>
+
+        <section class="account-panel model-stats-panel">
+          <div class="account-panel-head model-stats-head">
+            <div><h2>模型统计</h2><p>按模型汇总请求、成功、429 和错误</p></div>
+            <div class="model-stat-pills">
+              <span><strong x-text="totalReqs"></strong> 请求</span>
+              <span><strong class="metric-warn" x-text="totalRL"></strong> 429</span>
+            </div>
+          </div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>模型</th><th>请求</th><th>成功</th><th>429</th><th>错误</th><th>最后使用</th></tr></thead>
+            <tbody>
+              <template x-for="(s,n) in stats" :key="n"><tr>
+                <td style="font-weight:500" x-text="n.replace('models/','')"></td>
+                <td x-text="s.requests||0"></td>
+                <td><span class="badge badge-green" x-text="s.success||0"></span></td>
+                <td><span class="badge" :class="(s.rate_limited||0)>0?'badge-red':'badge-gray'" x-text="s.rate_limited||0"></span></td>
+                <td x-text="s.errors||0"></td>
+                <td style="font-size:13px;color:var(--muted)" x-text="fmtDate(s.last_used)"></td>
+              </tr></template>
+              <tr x-show="!Object.keys(stats).length"><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">暂无数据</td></tr>
+            </tbody></table></div>
+        </section>
+
+        <section class="account-panel account-table-panel">
+          <div class="account-panel-head">
+            <div><h2>账号池</h2><p x-text="accountRows.length+' 个账号 · '+totalAccountRequests+' 次请求'"></p></div>
+          </div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>账号</th><th>等级</th><th>请求</th><th>负载</th><th>图片分辨率</th><th>健康</th><th>池状态</th><th>操作</th></tr></thead>
+            <tbody>
+              <template x-for="a in accountRows" :key="a.id"><tr>
+                <td>
+                  <div x-show="renameId!==a.id">
+                    <div class="acct-name" x-text="a.name||a.email||a.id"></div>
+                    <div class="acct-meta" x-show="a.email&&a.email!==a.name" x-text="a.email"></div>
+                    <div class="acct-id" x-text="a.id"></div>
+                    <div class="default-account-note" x-show="a.id===activeId">默认账号</div>
+                  </div>
+                  <div class="inline-edit" x-show="renameId===a.id">
+                    <input class="inline-input" type="text" x-model="renameDraft" placeholder="账号名称" @keydown.enter.prevent="renameAccount(a)" @keydown.escape.prevent="cancelRename()">
+                    <div class="acct-id" x-text="a.id"></div>
+                  </div>
+                </td>
+                <td>
+                  <div class="tier-cell"><div class="cselect" :class="{open:openSelect==='tier-'+a.id}" @click.stop>
+                    <div class="cselect-btn" @click="toggleSelect('tier-'+a.id,$event)" tabindex="0"><span x-text="tierLabel(a.tier)"></span><span class="arrow"></span></div>
+                    <div class="cselect-menu">
+                      <template x-for="v in ['free','pro','ultra']"><div class="cselect-opt" :class="{active:(a.tier||'free')===v}" @click="updateTier(a,v);openSelect=null" x-text="tierLabel(v)"></div></template>
+                    </div>
+                  </div><span class="tier-note" x-show="['pro','ultra'].includes(a.tier)">高级</span></div>
+                </td>
+                <td><div class="request-stack"><strong x-text="a.requests||0"></strong><span><span x-text="a.success||0"></span> 成功 · <span x-text="a.rate_limited||0"></span> 429</span></div></td>
+                <td><div class="load-stack"><strong x-text="accountLoad(a)"></strong><span>绑定用户/会话</span><small x-show="a.in_flight" x-text="a.in_flight+' 个处理中'"></small></div></td>
+                <td>
+                  <div class="resolution-stack" x-show="imageSizeEntries(a).length" x-cloak>
+                    <template x-for="([size,count]) in imageSizeEntries(a)" :key="size"><span class="resolution-chip"><span x-text="size"></span><strong x-text="count"></strong></span></template>
+                  </div>
+                  <span class="acct-meta" x-show="!imageSizeEntries(a).length">暂无图片</span>
+                </td>
+                <td><span class="badge" :class="healthClass(a.health_status)" x-text="healthLabel(a.health_status)"></span><div class="acct-meta" x-show="a.health_reason" x-text="a.health_reason"></div><div class="acct-meta" x-show="a.isolated_until" x-text="'至 '+fmtDate(a.isolated_until)"></div></td>
+                <td><span class="badge" :class="poolStatusClass(a)" x-text="poolStatusLabel(a)"></span><div class="acct-meta" x-text="poolStatusDetail(a)"></div></td>
+                <td>
+                  <div class="table-actions">
+                    <button class="btn btn-sm" x-show="a.id!==activeId" :disabled="isRowBusy(a.id)" @click="activateAccount(a.id)" x-text="isAccountBusy('activate',a.id)?'激活中':'手动激活'"></button>
+                    <button class="btn btn-sm" :disabled="isRowBusy(a.id)" @click="testAccount(a)" x-text="isAccountBusy('health',a.id)?'检查中':'健康检查'"></button>
+                    <button class="btn btn-sm" x-show="renameId!==a.id" :disabled="isRowBusy(a.id)" @click="beginRename(a)">重命名</button>
+                    <template x-if="renameId===a.id">
+                      <div class="table-actions">
+                        <button class="btn btn-sm btn-primary" :disabled="isAccountBusy('rename',a.id)||!renameDraft.trim()" @click="renameAccount(a)" x-text="isAccountBusy('rename',a.id)?'保存中':'保存'"></button>
+                        <button class="btn btn-sm" :disabled="isAccountBusy('rename',a.id)" @click="cancelRename()">取消</button>
+                      </div>
+                    </template>
+                    <button class="btn btn-sm btn-danger-outline" x-show="deleteConfirmId!==a.id" :disabled="isRowBusy(a.id)" @click="requestDeleteAccount(a)">删除</button>
+                    <template x-if="deleteConfirmId===a.id">
+                      <div class="delete-confirm">
+                        <div class="confirm-text">删除 <strong x-text="accountLabel(a)"></strong>？</div>
+                        <div class="table-actions">
+                          <button class="btn btn-sm btn-danger" :disabled="isAccountBusy('delete',a.id)" @click="deleteAccount(a)" x-text="isAccountBusy('delete',a.id)?'删除中':'确认删除'"></button>
+                          <button class="btn btn-sm" :disabled="isAccountBusy('delete',a.id)" @click="cancelDelete()">取消</button>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </td>
+              </tr></template>
+              <tr x-show="!accountRows.length"><td colspan="8" style="text-align:center;color:var(--muted);padding:24px" x-text="accountsLoading?'正在加载账号...':accountsError?'账号列表加载失败':'暂无账号'"></td></tr>
+            </tbody></table></div>
+        </section>
+
+        <section class="account-panel credential-panel-wide">
+          <div class="account-panel-head"><div><h2>凭证导入 / 导出</h2><p>备份内容包含敏感 Cookie 和令牌</p></div></div>
+          <div class="credential-box compact-credentials">
+            <div class="credential-grid">
+              <div class="credential-panel">
+                <div class="credential-title">导出</div>
+                <div class="table-actions">
+                  <button class="btn" :disabled="credentialExporting" @click="exportCredentials()" x-text="credentialExporting?'导出中':'导出全部'"></button>
+                  <button class="btn" :disabled="credentialExporting||!activeId" @click="exportCredentials(activeId)">导出当前激活</button>
+                </div>
+                <textarea class="credential-textarea" x-model="credentialExportText" readonly placeholder="导出的凭证备份会显示在这里"></textarea>
+              </div>
+              <div class="credential-panel">
+                <div class="credential-title">导入</div>
+                <input class="credential-input" type="text" x-model="credentialImportName" placeholder="单账号导入名称（可选）">
+                <textarea class="credential-textarea" x-model="credentialImportText" placeholder="粘贴备份 JSON 或单账号 auth.json / storage state"></textarea>
+                <div class="table-actions">
+                  <button class="btn btn-primary" :disabled="credentialImporting||!credentialImportText.trim()" @click="importCredentials()" x-text="credentialImporting?'导入中':'导入凭证'"></button>
+                </div>
+              </div>
+            </div>
+            <div class="notice notice-error" x-show="credentialError" x-text="credentialError"></div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="image-preview-overlay" x-show="imagePreview" x-cloak @click="closeImagePreview()" @keydown.escape.window="closeImagePreview()">
+  <button type="button" class="image-preview-close" @click.stop="closeImagePreview()" title="关闭预览">×</button>
+  <img class="image-preview-img" :src="imagePreview?imageUrl(imagePreview):''" :alt="imagePreview&&imagePreview.prompt||'image preview'">
+</div>
+
+<div class="toast" :class="{show:toast.show}" x-text="toast.msg"></div>
+<script src="/static/app.js?v=20260531-stream-rendering"></script>
+<script defer src="/static/alpine.min.js"></script>
+</body>
+</html>

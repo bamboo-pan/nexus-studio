@@ -1,0 +1,340 @@
+"""Typed response models and parsers."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import Any
+
+from aistudio_api.infrastructure.utils.common import (
+    decode_base64_images,
+    extract_outer_json,
+)
+
+
+@dataclass
+class GeneratedImage:
+    mime: str
+    data: bytes
+    size: int
+
+
+@dataclass
+class Candidate:
+    text: str = ""
+    thinking: str = ""
+    images: list[GeneratedImage] = field(default_factory=list)
+    reasoning_images: list[GeneratedImage] = field(default_factory=list)
+    function_calls: list[dict[str, Any]] = field(default_factory=list)
+    function_responses: list[dict[str, Any]] = field(default_factory=list)
+    sources: list[dict] = field(default_factory=list)
+    code_output: str = ""
+    finish_reason: int | None = None
+    finish_message: str = ""
+    safety_ratings: list[dict] = field(default_factory=list)
+
+    @property
+    def has_content(self) -> bool:
+        return bool(self.text or self.images or self.code_output or self.function_calls or self.function_responses)
+
+
+@dataclass
+class ModelOutput:
+    candidates: list[Candidate] = field(default_factory=list)
+    model: str = ""
+    raw_response: str = ""
+    response_id: str = ""
+    usage: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def text(self) -> str:
+        return self.candidates[0].text if self.candidates else ""
+
+    @property
+    def thinking(self) -> str:
+        return self.candidates[0].thinking if self.candidates else ""
+
+    @property
+    def images(self) -> list[GeneratedImage]:
+        return self.candidates[0].images if self.candidates else []
+
+    @property
+    def reasoning_images(self) -> list[GeneratedImage]:
+        return self.candidates[0].reasoning_images if self.candidates else []
+
+    @property
+    def function_calls(self) -> list[dict[str, Any]]:
+        return self.candidates[0].function_calls if self.candidates else []
+
+    @property
+    def function_responses(self) -> list[dict[str, Any]]:
+        return self.candidates[0].function_responses if self.candidates else []
+
+    @property
+    def sources(self) -> list[dict]:
+        return self.candidates[0].sources if self.candidates else []
+
+    @property
+    def code_output(self) -> str:
+        return self.candidates[0].code_output if self.candidates else ""
+
+    @property
+    def has_content(self) -> bool:
+        return any(c.has_content for c in self.candidates)
+
+
+@dataclass
+class ResponsePart:
+    text: str = ""
+    inline_data: tuple[str, str] | None = None
+    thought: bool = False
+    function_call: dict[str, Any] | None = None
+    function_response: dict[str, Any] | None = None
+    executable_code: Any = None
+    code_execution_result: Any = None
+
+
+def _looks_like_response_chunk(value: Any) -> bool:
+    return isinstance(value, list) and len(value) > 0 and isinstance(value[0], list)
+
+
+def _iter_response_chunks(outer: Any) -> list[list]:
+    if isinstance(outer, list) and outer:
+        if len(outer) == 1 and isinstance(outer[0], list):
+            inner = outer[0]
+            if all(_looks_like_response_chunk(item) for item in inner if isinstance(item, list)):
+                return [item for item in inner if isinstance(item, list)]
+        if all(_looks_like_response_chunk(item) for item in outer if isinstance(item, list)):
+            return [item for item in outer if isinstance(item, list)]
+
+    if _looks_like_response_chunk(outer):
+        return [outer]
+
+    return []
+
+
+def _parse_response_part(raw_part: Any) -> ResponsePart:
+    if not isinstance(raw_part, list):
+        return ResponsePart()
+
+    thought = False
+    if len(raw_part) > 10 and isinstance(raw_part[10], bool):
+        thought = raw_part[10]
+    elif len(raw_part) > 0 and isinstance(raw_part[0], bool):
+        thought = raw_part[0]
+    # Observed AI Studio variant: reasoning chunks may end with `[12] = 1`
+    # while the plain answer chunks remain short `[null, "text"]`.
+    elif len(raw_part) > 12 and raw_part[12] == 1:
+        thought = True
+
+    inline_data = None
+    if len(raw_part) > 2 and isinstance(raw_part[2], list) and len(raw_part[2]) >= 2:
+        inline_data = (raw_part[2][0], raw_part[2][1])
+
+    function_call = _coerce_wire_payload(raw_part[3] if len(raw_part) > 3 else None, "functionCall")
+    if function_call is None and len(raw_part) > 10:
+        function_call = _coerce_wire_payload(raw_part[10], "functionCall")
+    function_response = _coerce_wire_payload(raw_part[4] if len(raw_part) > 4 else None, "functionResponse")
+    executable_code = raw_part[8] if len(raw_part) > 8 else None
+    code_execution_result = raw_part[9] if len(raw_part) > 9 else None
+
+    return ResponsePart(
+        text=raw_part[1] if len(raw_part) > 1 and isinstance(raw_part[1], str) else "",
+        inline_data=inline_data,
+        thought=thought,
+        function_call=function_call,
+        function_response=function_response,
+        executable_code=executable_code,
+        code_execution_result=code_execution_result,
+    )
+
+
+def _coerce_wire_payload(raw_value: Any, payload_type: str) -> dict[str, Any] | None:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, dict):
+        payload = dict(raw_value)
+        payload.setdefault("type", payload_type)
+        return payload
+    if isinstance(raw_value, list):
+        payload: dict[str, Any] = {"type": payload_type, "raw": raw_value}
+        if raw_value and isinstance(raw_value[0], str):
+            payload["name"] = raw_value[0]
+        if len(raw_value) > 1:
+            second = raw_value[1]
+            if isinstance(second, dict):
+                payload["args"] = second
+            elif isinstance(second, list):
+                payload["args"] = _decode_wire_argument_pairs(second)
+            elif isinstance(second, str):
+                stripped = second.strip()
+                if stripped.startswith("{") or stripped.startswith("["):
+                    try:
+                        payload["args"] = json.loads(second)
+                    except json.JSONDecodeError:
+                        payload["arguments"] = second
+                else:
+                    payload["arguments"] = second
+            elif second is not None:
+                payload["args"] = second
+        return payload
+    return {"type": payload_type, "raw": raw_value}
+
+
+def _decode_wire_argument_pairs(raw_args: Any) -> Any:
+    if not isinstance(raw_args, list):
+        return raw_args
+
+    if all(isinstance(item, list) and len(item) >= 2 and isinstance(item[0], str) for item in raw_args):
+        result = {}
+        for key, value in raw_args:
+            result[key] = _decode_wire_value(value)
+        return result
+
+    if len(raw_args) == 1 and isinstance(raw_args[0], list):
+        return _decode_wire_argument_pairs(raw_args[0])
+
+    return [_decode_wire_value(item) for item in raw_args]
+
+
+def _decode_wire_value(value: Any) -> Any:
+    if isinstance(value, list):
+        if len(value) >= 3 and value[2] is not None:
+            return value[2]
+        decoded = _decode_wire_argument_pairs(value)
+        if decoded != value:
+            return decoded
+    return value
+
+
+def _parse_usage_metadata(raw_usage: Any) -> dict[str, Any]:
+    if not isinstance(raw_usage, list):
+        return {}
+    visible_completion_tokens = raw_usage[1] if len(raw_usage) > 1 else None
+    reasoning_tokens = raw_usage[9] if len(raw_usage) > 9 else None
+    completion_tokens = visible_completion_tokens
+    if isinstance(visible_completion_tokens, int) and isinstance(reasoning_tokens, int):
+        completion_tokens = visible_completion_tokens + reasoning_tokens
+    return {
+        "prompt_tokens": raw_usage[0] if len(raw_usage) > 0 else None,
+        "completion_tokens": completion_tokens,
+        "total_tokens": raw_usage[2] if len(raw_usage) > 2 else None,
+        "cached_tokens": raw_usage[3] if len(raw_usage) > 3 else None,
+        "prompt_tokens_details": raw_usage[4] if len(raw_usage) > 4 else None,
+        "completion_tokens_details": {
+            "reasoning_tokens": reasoning_tokens or 0,
+            "visible_tokens": visible_completion_tokens or 0,
+        },
+    }
+
+
+def parse_chunk_usage(chunk: Any) -> dict[str, Any]:
+    if not isinstance(chunk, list):
+        return {}
+    return _parse_usage_metadata(chunk[2] if len(chunk) > 2 else None)
+
+
+def parse_response_chunk(chunk: list) -> Candidate:
+    candidate = Candidate()
+    if not isinstance(chunk, list) or not chunk or not isinstance(chunk[0], list) or not chunk[0]:
+        return candidate
+
+    raw_candidate = chunk[0][0]
+    if not isinstance(raw_candidate, list):
+        return candidate
+
+    raw_content = raw_candidate[0] if len(raw_candidate) > 0 else None
+    raw_parts = raw_content[0] if isinstance(raw_content, list) and len(raw_content) > 0 else []
+
+    text_parts = []
+    thinking_parts = []
+    images = []
+    reasoning_images = []
+    function_calls = []
+    function_responses = []
+    code_outputs = []
+
+    for raw_part in raw_parts if isinstance(raw_parts, list) else []:
+        part = _parse_response_part(raw_part)
+        if part.inline_data:
+            decoded = decode_base64_images([{"mime": part.inline_data[0], "data": part.inline_data[1]}])
+            decoded_images = [
+                GeneratedImage(mime=img["mime"], data=img["bytes"], size=img["size"])
+                for img in decoded
+            ]
+            if part.thought:
+                reasoning_images.extend(decoded_images)
+            else:
+                images.extend(decoded_images)
+        if part.executable_code:
+            code_outputs.append(str(part.executable_code))
+        if part.code_execution_result:
+            code_outputs.append(str(part.code_execution_result))
+        if part.function_call:
+            function_calls.append(part.function_call)
+        if part.function_response:
+            function_responses.append(part.function_response)
+        if part.text:
+            if part.thought:
+                thinking_parts.append(part.text)
+            else:
+                text_parts.append(part.text)
+
+    candidate.text = "".join(text_parts)
+    candidate.thinking = "".join(thinking_parts)
+    candidate.images = images
+    candidate.reasoning_images = reasoning_images
+    candidate.function_calls = function_calls
+    candidate.function_responses = function_responses
+    candidate.code_output = "\n".join(code_outputs)
+    candidate.finish_reason = raw_candidate[1] if len(raw_candidate) > 1 and isinstance(raw_candidate[1], int) else None
+    candidate.finish_message = raw_candidate[3] if len(raw_candidate) > 3 and isinstance(raw_candidate[3], str) else ""
+    candidate.safety_ratings = raw_candidate[4] if len(raw_candidate) > 4 and isinstance(raw_candidate[4], list) else []
+    return candidate
+
+
+def parse_text_output(raw: str) -> ModelOutput:
+    output = ModelOutput(raw_response=raw)
+
+    parts = extract_outer_json(raw)
+    if not parts:
+        return output
+
+    outer = parts[0]
+    chunks = _iter_response_chunks(outer)
+    if not chunks:
+        return output
+
+    merged = Candidate()
+    for chunk in chunks:
+        parsed = parse_response_chunk(chunk)
+        if parsed.text:
+            merged.text += parsed.text
+        if parsed.thinking:
+            merged.thinking += parsed.thinking
+        if parsed.images:
+            merged.images.extend(parsed.images)
+        if parsed.reasoning_images:
+            merged.reasoning_images.extend(parsed.reasoning_images)
+        if parsed.function_calls:
+            merged.function_calls.extend(parsed.function_calls)
+        if parsed.function_responses:
+            merged.function_responses.extend(parsed.function_responses)
+        if parsed.code_output:
+            merged.code_output = "\n".join(filter(None, [merged.code_output, parsed.code_output]))
+        if parsed.finish_reason is not None:
+            merged.finish_reason = parsed.finish_reason
+        if parsed.finish_message:
+            merged.finish_message = parsed.finish_message
+        if parsed.safety_ratings:
+            merged.safety_ratings = parsed.safety_ratings
+
+    last_chunk = chunks[-1]
+    output.usage = _parse_usage_metadata(last_chunk[2] if len(last_chunk) > 2 else None)
+    output.response_id = last_chunk[7] if len(last_chunk) > 7 and isinstance(last_chunk[7], str) else ""
+    output.candidates = [merged]
+    return output
+
+
+def parse_image_output(raw: str) -> ModelOutput:
+    return parse_text_output(raw)

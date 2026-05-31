@@ -1,0 +1,10 @@
+开发流程：
+0. 除非在澄清需求里有不得不停下来跟用户确认的点，否则不要中断，一直执行到完成，包括commit提交等
+1. 开始前先确认工作区状态：`git status`，如果有任何改动，直接stash，确保工作区干净
+2. 在 `master` 上pull远端最新代码到本地，git pull --ff-only origin master
+3. 基于master,根据任务新建 feature 分支，然后follow trellis流程实现用户指定的任务
+4. 任务完成后，先git fetch origin，将origin/master合并到当前分支，如果有冲突则处理冲突，至少运行与合并影响面相关的测试，如果是代码/API/账号/浏览器/网关相关改动，必须跑wsl真实测试
+5. 最终测试通过、真实环境测试按需通过后，commit 必须包含本任务相关代码和 .trellis/tasks/<当前任务目录>/ 下的任务信息文件；确认无本任务相关未提交文件后，再运行 /finish-work。
+6. 创建PR将合并后的分支merge回主分支master
+7. 本地切换到 master，git pull --ff-only origin master，确认合并处理完成
+8. 确认 PR 已合并，且本地分支已合并进 master，删除已经被合并进master的分支,通知用户完成
