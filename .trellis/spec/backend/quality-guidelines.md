@@ -101,7 +101,59 @@ aistudio-api = "aistudio_api.main:main"
 
 <!-- What level of testing is expected -->
 
-(To be filled by the team)
+### Scenario: Architecture-Driven System Test Plan Updates
+
+#### 1. Scope / Trigger
+
+- Trigger: Updating `ARCHITECTURE.md`, introducing a new runtime boundary, or changing which product surfaces share backend control/data-plane behavior.
+- Scope: `SYSTEM_TEST_PLAN.md` and the executable contract test that keeps it aligned with architecture claims.
+
+#### 2. Signatures
+
+- Source architecture document: `ARCHITECTURE.md`.
+- Required global system plan: `SYSTEM_TEST_PLAN.md`.
+- Required contract test file for architecture/test-plan alignment: `tests/unit/test_system_test_plan_architecture_contract.py`.
+
+#### 3. Contracts
+
+- `SYSTEM_TEST_PLAN.md` must name every new shared runtime boundary that affects real end-to-end verification.
+- Future-facing architecture claims must be gated by evidence checks, not marked passing before routes, UI, registry state, gateway integration, and request logs exist.
+- Real system test requirements must distinguish local unit/doc contracts from WSL API/UI smoke results and external-service blockers.
+
+#### 4. Validation & Error Matrix
+
+| Condition | Required handling |
+| --- | --- |
+| Architecture adds a shared control plane or data plane | Add explicit test-plan coverage and a doc contract assertion. |
+| Architecture describes a staged rollout | Add phase gates and define pass/fail/not-applicable evidence. |
+| A future feature has no implemented API/UI/runtime evidence | Gate it as not applicable or blocked; do not record it as pass. |
+| WSL real system test fails on an external dependency | Preserve the artifact path and failure reason; do not claim complete system-test pass. |
+
+#### 5. Good/Base/Bad Cases
+
+- Good: Provider Manager, shared provider-model pool, runtime gateway, routing policy, fallback, and audit logs are all present in `SYSTEM_TEST_PLAN.md` and asserted by a unit contract.
+- Base: Existing Local Studio API/UI smoke remains unchanged while new architecture sections add phase gates for not-yet-implemented surfaces.
+- Bad: Updating architecture with Provider Manager claims while the system plan only tests legacy Local Studio endpoints.
+
+#### 6. Tests Required
+
+- Unit contract: assert that `SYSTEM_TEST_PLAN.md` contains the architecture terms and evidence gates needed for the changed runtime boundary.
+- Full unit suite: run all `tests/unit` after modifying the contract.
+- Real WSL system test: run API and UI smoke from a copied workspace with real configured credentials, and record any controlled limitation or blocker.
+
+#### 7. Wrong vs Correct
+
+Wrong:
+
+```markdown
+Provider Manager testing: covered by existing Local Studio smoke.
+```
+
+Correct:
+
+```markdown
+Provider Manager gates are not applicable until route/page/registry/gateway/log evidence exists; Local Studio smoke remains a separate shared-runtime consumer check.
+```
 
 ---
 
