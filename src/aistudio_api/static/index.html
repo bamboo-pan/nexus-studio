@@ -940,7 +940,7 @@
           </div>
           <div class="account-hero-actions">
             <button class="btn" :disabled="providerManagerLoading" @click="refreshProviderManager()" x-text="providerManagerLoading?'刷新中':'刷新'">刷新</button>
-            <button class="btn btn-primary" @click="newProviderManagerProvider()">新建 OpenAI Provider</button>
+            <button class="btn btn-primary" @click="newProviderManagerProvider()">新建 provider</button>
           </div>
         </div>
 
@@ -994,32 +994,6 @@
             </div>
           </section>
 
-          <section class="account-panel provider-form-panel">
-            <div class="account-panel-head provider-panel-head">
-              <div><h2 x-text="providerManagerDraft.id?'编辑 OpenAI Provider':'新建 OpenAI Provider'"></h2><p x-text="providerManagerDraft.id||'openai-compatible'"></p></div>
-            </div>
-            <div class="provider-form">
-              <label class="account-field provider-field">Name<input type="text" x-model="providerManagerDraft.name" placeholder="OpenAI Compatible"></label>
-              <label class="account-field provider-field">Base URL<input type="text" x-model="providerManagerDraft.base_url" placeholder="https://api.example.com/v1"></label>
-              <div class="provider-form-row">
-                <label class="account-field provider-field">Timeout<input type="number" min="1" max="600" x-model.number="providerManagerDraft.timeout"></label>
-                <label class="provider-check"><input type="checkbox" x-model="providerManagerDraft.enabled"><span>Enabled</span></label>
-                <label class="account-field provider-field">Health<select class="sel" x-model="providerManagerDraft.health_status"><option value="unknown">unknown</option><option value="ready">ready</option><option value="disabled">disabled</option><option value="auth_failed">auth_failed</option><option value="quota_exhausted">quota_exhausted</option><option value="degraded">degraded</option></select></label>
-              </div>
-              <label class="account-field provider-field">API Token<input type="password" x-ref="providerManagerToken" autocomplete="off" placeholder="Bearer token"></label>
-              <label class="account-field provider-field">Health Note<input type="text" x-model="providerManagerDraft.health_message" placeholder="可选"></label>
-              <div class="provider-json-grid">
-                <label class="account-field provider-field">Aliases JSON<textarea x-model="providerManagerDraft.aliases" rows="4"></textarea></label>
-                <label class="account-field provider-field">Defaults JSON<textarea x-model="providerManagerDraft.defaults" rows="4"></textarea></label>
-              </div>
-              <label class="account-field provider-field">Manual Model Catalog JSON<textarea x-model="providerManagerDraft.model_catalog_text" rows="8"></textarea></label>
-              <div class="provider-form-actions">
-                <button class="btn" @click="newProviderManagerProvider()">清空</button>
-                <button class="btn btn-primary" :disabled="providerManagerSaving" @click="saveProviderManagerProvider()" x-text="providerManagerSaving?'保存中':'保存 Provider'"></button>
-              </div>
-            </div>
-          </section>
-
           <section class="account-panel provider-models-panel">
             <div class="account-panel-head provider-panel-head">
               <div><h2>Model Catalog</h2><p x-text="providerManagerProviderModels().length+' 个当前 Provider 模型'"></p></div>
@@ -1050,6 +1024,84 @@
               </template>
             </div>
             <div class="account-empty" x-show="!providerManagerRecentAudit().length">暂无审计事件</div>
+          </section>
+        </div>
+
+        <div class="provider-modal-backdrop" x-show="providerManagerDialogOpen" x-cloak @click.self="closeProviderManagerDialog()" @keydown.escape.window="providerManagerDialogOpen&&closeProviderManagerDialog()">
+          <section class="provider-modal" role="dialog" aria-modal="true" aria-labelledby="provider-dialog-title">
+            <div class="provider-modal-head">
+              <div>
+                <div class="account-kicker">OpenAI Compatible</div>
+                <h2 id="provider-dialog-title" x-text="providerManagerDraft.id?'编辑 provider':'新建 provider'"></h2>
+                <p x-text="providerManagerDraft.id||'draft provider'"></p>
+              </div>
+              <button type="button" class="icon-btn" @click="closeProviderManagerDialog()" title="关闭" aria-label="关闭">
+                <svg viewBox="0 0 24 24"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>
+              </button>
+            </div>
+
+            <div class="provider-modal-body">
+              <div class="provider-dialog-grid">
+                <label class="account-field provider-field">Name<input type="text" x-ref="providerManagerName" x-model="providerManagerDraft.name" placeholder="OpenAI Compatible"></label>
+                <label class="account-field provider-field provider-field-wide">Base URL<input type="text" x-model="providerManagerDraft.base_url" placeholder="https://api.example.com/v1"></label>
+                <label class="account-field provider-field">Timeout<input type="number" min="1" max="600" x-model.number="providerManagerDraft.timeout"></label>
+                <label class="account-field provider-field">Health<select class="sel" x-model="providerManagerDraft.health_status"><option value="unknown">unknown</option><option value="ready">ready</option><option value="disabled">disabled</option><option value="auth_failed">auth_failed</option><option value="quota_exhausted">quota_exhausted</option><option value="degraded">degraded</option></select></label>
+                <label class="provider-check"><input type="checkbox" x-model="providerManagerDraft.enabled"><span>Enabled</span></label>
+              </div>
+
+              <div class="provider-token-line">
+                <label class="account-field provider-field">API Token<input :type="providerManagerTokenVisible?'text':'password'" x-ref="providerManagerToken" autocomplete="off" placeholder="Bearer token"></label>
+                <button type="button" class="icon-btn provider-token-toggle" @click="toggleProviderManagerTokenVisible()" :title="providerManagerTokenVisible?'隐藏 token':'显示 token'" :aria-label="providerManagerTokenVisible?'隐藏 token':'显示 token'" :aria-pressed="providerManagerTokenVisible.toString()">
+                  <svg viewBox="0 0 24 24" x-show="!providerManagerTokenVisible"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="3"/></svg>
+                  <svg viewBox="0 0 24 24" x-show="providerManagerTokenVisible" x-cloak><path d="M2 12s3.5-6 10-6c2 0 3.8.6 5.2 1.4"/><path d="M22 12s-3.5 6-10 6c-2 0-3.8-.6-5.2-1.4"/><path d="M4 4l16 16"/><path d="M9.9 9.9A3 3 0 0012 15a3 3 0 002.1-.9"/></svg>
+                </button>
+              </div>
+
+              <label class="account-field provider-field">Health Note<input type="text" x-model="providerManagerDraft.health_message" placeholder="可选"></label>
+
+              <div class="provider-discovery-bar">
+                <label class="account-field provider-field">Mode<select class="sel" x-model="providerManagerDraft.discover_mode"><option value="responses">OpenAI Responses</option><option value="openai">OpenAI Chat</option><option value="gemini">Gemini</option><option value="claude">Claude</option></select></label>
+                <button class="btn" :disabled="providerManagerDiscovering" @click="discoverProviderManagerModels()" x-text="providerManagerDiscovering?'抓取中':'抓取模型'"></button>
+                <div class="provider-manual-add">
+                  <input type="text" x-model="providerManagerDraft.new_model_id" @keydown.enter.prevent="addProviderManagerManualModel()" placeholder="model id">
+                  <button class="btn" @click="addProviderManagerManualModel()">添加</button>
+                </div>
+              </div>
+
+              <div class="provider-dialog-catalog">
+                <div class="provider-dialog-section-head">
+                  <h3>Model Catalog</h3>
+                  <span x-text="(providerManagerDraft.model_catalog||[]).length+' 个模型'"></span>
+                </div>
+                <div class="provider-draft-model-list" x-show="providerManagerDraft.model_catalog.length" x-cloak>
+                  <template x-for="(model,index) in providerManagerDraft.model_catalog" :key="model.external_model_id+'-'+index">
+                    <article class="provider-draft-model">
+                      <div class="provider-draft-main">
+                        <label class="account-field provider-field">Display<input type="text" x-model="model.display_name"></label>
+                        <label class="account-field provider-field">Model ID<input type="text" x-model="model.external_model_id"></label>
+                        <label class="account-field provider-field provider-field-wide">Aliases<input type="text" x-model="model.alias_text" placeholder="fast, default"></label>
+                      </div>
+                      <div class="provider-draft-meta">
+                        <span class="badge" :class="model.source==='discovered'?'badge-green':'badge-gray'" x-text="model.source||'manual'"></span>
+                        <span x-text="(model.modalities||[]).join(' / ')||'capabilities pending'"></span>
+                      </div>
+                      <div class="provider-draft-actions">
+                        <button type="button" class="btn btn-sm" :class="{'btn-primary':model.default_text}" @click="setProviderManagerDefaultModel(model,'text')">默认文本</button>
+                        <button type="button" class="btn btn-sm" :class="{'btn-primary':model.default_image}" @click="setProviderManagerDefaultModel(model,'image')">默认图像</button>
+                        <button type="button" class="btn btn-sm btn-danger-outline" @click="removeProviderManagerModel(index)">移除</button>
+                      </div>
+                      <pre x-text="jsonPretty(model.capabilities||{})"></pre>
+                    </article>
+                  </template>
+                </div>
+                <div class="account-empty" x-show="!providerManagerDraft.model_catalog.length">抓取或添加模型后会自动写入能力、模态和别名目录。</div>
+              </div>
+            </div>
+
+            <div class="provider-modal-footer">
+              <button class="btn" @click="closeProviderManagerDialog()">取消</button>
+              <button class="btn btn-primary" :disabled="providerManagerSaving" @click="saveProviderManagerProvider()" x-text="providerManagerSaving?'保存中':'保存 provider'"></button>
+            </div>
           </section>
         </div>
       </div>

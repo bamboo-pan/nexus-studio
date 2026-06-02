@@ -4,6 +4,7 @@ import json
 import httpx
 from fastapi import FastAPI
 
+from aistudio_api.api import routes_provider_manager as provider_routes
 from aistudio_api.api.routes_provider_manager import router as provider_manager_router
 from aistudio_api.config import settings
 from aistudio_api.infrastructure.provider_manager import ProviderManagerStore
@@ -202,6 +203,131 @@ def test_provider_manager_short_token_mask_does_not_expose_complete_token(tmp_pa
     assert fetched.status_code == 200
     assert fetched.json()["credential"]["masked"] == "***"
     assert secret not in fetched.text
+
+
+def test_provider_manager_discovers_models_with_stored_token_without_leaking_secret(tmp_path, monkeypatch):
+    app = provider_manager_app(tmp_path, monkeypatch)
+    secret = "unit-discovery-token-value"
+    created = request_app(
+        app,
+        "POST",
+        "/api/provider-manager/providers",
+        json={"name": "Discovery", "base_url": "https://models.example.test/v1", "token": secret},
+    )
+    provider_id = created.json()["id"]
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        headers = {}
+        text = ""
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"id": "unit-chat", "object": "model", "owned_by": "unit"}, {"id": "gpt-image-2", "object": "model"}]}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url, headers):
+            captured["url"] = url
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr(provider_routes, "_new_http_client", lambda timeout: FakeClient(timeout))
+
+    discovered = request_app(
+        app,
+        "POST",
+        "/api/provider-manager/model-catalog/discover",
+        json={"provider_id": provider_id, "timeout": 17, "interface_mode": "responses"},
+    )
+
+    assert discovered.status_code == 200
+    assert captured["timeout"] == 17
+    assert captured["url"] == "https://models.example.test/v1/models"
+    assert captured["headers"]["Authorization"] == f"Bearer {secret}"
+    body = discovered.json()
+    assert body["total"] == 2
+    chat = next(model for model in body["data"] if model["external_model_id"] == "unit-chat")
+    image = next(model for model in body["data"] if model["external_model_id"] == "gpt-image-2")
+    assert chat["provider_id"] == provider_id
+    assert chat["source"] == "discovered"
+    assert chat["capabilities"]["text_output"] is True
+    assert "text" in chat["modalities"]
+    assert image["capabilities"]["image_output"] is True
+    assert "image_generation" in image["modalities"]
+    assert secret not in discovered.text
+
+    audit = request_app(app, "GET", "/api/provider-manager/audit").json()["data"]
+    discovery_event = next(event for event in audit if event["action"] == "provider.model_catalog.discovered")
+    assert discovery_event["target_id"] == provider_id
+    assert discovery_event["summary"]["model_count"] == 2
+    assert secret not in json.dumps(audit)
+
+
+def test_provider_manager_discovers_models_for_unsaved_provider_preview(tmp_path, monkeypatch):
+    app = provider_manager_app(tmp_path, monkeypatch)
+    secret = "unit-preview-token-value"
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        headers = {}
+        text = ""
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"id": "preview-chat", "object": "model"}]}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url, headers):
+            captured["url"] = url
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr(provider_routes, "_new_http_client", lambda timeout: FakeClient(timeout))
+
+    discovered = request_app(
+        app,
+        "POST",
+        "/api/provider-manager/model-catalog/discover",
+        json={
+            "base_url": "https://preview.example.test/v1",
+            "token": secret,
+            "timeout": 19,
+            "interface_mode": "responses",
+        },
+    )
+
+    assert discovered.status_code == 200
+    assert captured["timeout"] == 19
+    assert captured["url"] == "https://preview.example.test/v1/models"
+    assert captured["headers"]["Authorization"] == f"Bearer {secret}"
+    body = discovered.json()
+    assert body["data"][0]["provider_id"] == "provider_preview"
+    assert body["data"][0]["external_model_id"] == "preview-chat"
+    assert secret not in discovered.text
 
 
 def test_provider_manager_store_round_trips_custom_provider(tmp_path):

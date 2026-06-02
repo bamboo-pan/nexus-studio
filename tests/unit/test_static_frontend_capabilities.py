@@ -187,8 +187,16 @@ def test_static_frontend_exposes_provider_manager_page_without_token_state():
     assert "providerManagerProviders:[]" in app_js
     assert "providerManagerModels:[]" in app_js
     assert "providerManagerAudit:[]" in app_js
+    assert "providerManagerDialogOpen:false" in app_js
+    assert "providerManagerTokenVisible:false" in app_js
+    assert "providerManagerDiscovering:false" in app_js
     assert "providerManagerApiBase(){return'/api/provider-manager'}" in app_js
     assert "loadProviderManager()" in app_js
+    assert "newProviderManagerProvider()" in app_js
+    assert "editProviderManagerProvider(provider=this.providerManagerSelectedProvider())" in app_js
+    assert "toggleProviderManagerTokenVisible()" in app_js
+    assert "discoverProviderManagerModels()" in app_js
+    assert "providerManagerCatalogPayload()" in app_js
     assert "saveProviderManagerProvider()" in app_js
     assert "toggleProviderManagerProvider(provider)" in app_js
     assert "deleteProviderManagerProvider(provider)" in app_js
@@ -196,15 +204,25 @@ def test_static_frontend_exposes_provider_manager_page_without_token_state():
     assert "providerManagerAuditSummary(event)" in app_js
     assert "`${base}/providers`" in app_js
     assert "`${base}/model-catalog`" in app_js
+    assert "`${this.providerManagerApiBase()}/model-catalog/discover`" in app_js
     assert "`${base}/audit`" in app_js
+    assert "新建 provider" in index_html
+    assert "role=\"dialog\"" in index_html
     assert "x-ref=\"providerManagerToken\"" in index_html
+    assert "providerManagerTokenVisible?'text':'password'" in index_html
+    assert "toggleProviderManagerTokenVisible()" in index_html
+    assert "discoverProviderManagerModels()" in index_html
+    assert "Aliases" in index_html
+    assert "默认文本" in index_html
     assert "x-model=\"providerManagerDraft.token\"" not in index_html
     assert "token:''" not in app_js
     assert "finally{this.clearProviderManagerTokenField();this.providerManagerSaving=false}" in app_js
-    assert "providerManagerDraft:{id:'',name:'',enabled:true" in app_js
+    assert "providerManagerDraft:{id:'',name:'',enabled:true,base_url:'',timeout:120,model_catalog:[]" in app_js
     assert "Model Catalog" in index_html
     assert "Audit" in index_html
     assert ".provider-workspace" in style_css
+    assert ".provider-modal-backdrop" in style_css
+    assert ".provider-draft-model" in style_css
     assert ".provider-row.active" in style_css
     assert ".provider-model-card" in style_css
     assert ".provider-audit-card" in style_css

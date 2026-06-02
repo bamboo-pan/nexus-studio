@@ -14,7 +14,13 @@ from typing import Any
 
 from aistudio_api.config import DEFAULT_IMAGE_MODEL, DEFAULT_TEXT_MODEL, settings
 from aistudio_api.domain.model_capabilities import get_model_capabilities, list_model_metadata
-from aistudio_api.infrastructure.local_studio import normalize_openai_base_url
+from aistudio_api.infrastructure.local_studio import (
+    LOCAL_STUDIO_PROVIDER_OPENAI,
+    filter_chat_models,
+    filter_image_models,
+    normalize_interface_mode,
+    normalize_openai_base_url,
+)
 
 
 PROVIDER_GOOGLE_AI_STUDIO = "google-ai-studio"
@@ -216,6 +222,52 @@ def _google_model_catalog() -> list[dict[str, Any]]:
                     "metadata": {"owned_by": model.get("owned_by") or "google", "built_in": True},
                 },
                 provider_id=BUILT_IN_GOOGLE_PROVIDER_ID,
+                default_source="discovered",
+            )
+        )
+    return catalog
+
+
+def normalize_discovered_model_catalog(
+    models: list[Mapping[str, Any]],
+    *,
+    provider_id: str,
+    mode: str = "responses",
+) -> list[dict[str, Any]]:
+    normalized_mode = normalize_interface_mode(mode)
+    normalized_provider_id = _validate_id(provider_id or "provider_preview", label="provider id")
+    catalog: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    candidates = [
+        *filter_chat_models(models, mode=normalized_mode),
+        *filter_image_models(models, mode=normalized_mode, provider_type=LOCAL_STUDIO_PROVIDER_OPENAI),
+    ]
+    for model in candidates:
+        model_id = _clean_text(model.get("id") or model.get("name") or model.get("model"), max_length=180)
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        metadata = _normalize_mapping(
+            {
+                "owned_by": model.get("owned_by") or "openai-compatible",
+                "object": model.get("object") or "model",
+                "image_generation": model.get("image_generation") if isinstance(model.get("image_generation"), Mapping) else None,
+            }
+        )
+        context_window = model.get("context_window") or model.get("contextWindow") or model.get("max_context_length") or model.get("maxContextLength")
+        catalog.append(
+            _normalize_model_entry(
+                {
+                    "external_model_id": model_id,
+                    "display_name": model.get("display_name") or model.get("displayName") or model.get("name") or model_id,
+                    "capabilities": model.get("capabilities"),
+                    "aliases": model.get("aliases") if isinstance(model.get("aliases"), list) else [],
+                    "defaults": model.get("defaults") if isinstance(model.get("defaults"), Mapping) else {},
+                    "context_window": context_window,
+                    "source": "discovered",
+                    "metadata": metadata,
+                },
+                provider_id=normalized_provider_id,
                 default_source="discovered",
             )
         )
@@ -456,6 +508,33 @@ class ProviderManagerStore:
 
     def update_model_catalog(self, provider_id: str, entries: list[Mapping[str, Any]]) -> dict[str, Any]:
         return self.update_provider(provider_id, {"model_catalog": entries})
+
+    def get_provider_token(self, provider_id: str, credential_ref: str | None = None) -> str:
+        provider_id = _validate_id(provider_id, label="provider id")
+        if provider_id == BUILT_IN_GOOGLE_PROVIDER_ID:
+            return ""
+        provider = self._find_custom_provider(provider_id)
+        if provider is None:
+            raise FileNotFoundError(provider_id)
+        resolved_ref = _clean_text(credential_ref or provider.get("credential_ref"), max_length=80)
+        if not resolved_ref:
+            return ""
+        credential = self._read_credentials().get(resolved_ref)
+        if not isinstance(credential, Mapping):
+            return ""
+        return _normalize_token(credential.get("token"))
+
+    def record_model_discovery(self, *, provider_id: str, model_count: int, status: str, error: str = "") -> None:
+        target_id = _clean_text(provider_id or "draft-provider", max_length=120) or "draft-provider"
+        summary: dict[str, Any] = {"model_count": max(0, int(model_count)), "source": "discovered"}
+        if error:
+            summary["error"] = _clean_text(error, max_length=240)
+        self._append_audit(
+            action="provider.model_catalog.discovered",
+            target_id=target_id,
+            status=status,
+            summary=summary,
+        )
 
     def list_audit_events(self, *, limit: int = 100) -> list[dict[str, Any]]:
         self.ensure_directory()
