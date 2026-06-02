@@ -13,7 +13,7 @@ from dotenv import dotenv_values, set_key, unset_key
 
 from aistudio_api.application.api_service import health_response, stats_response
 from aistudio_api.api.dependencies import get_runtime_state
-from aistudio_api.config import DEFAULT_IMAGE_MODEL, DEFAULT_RUNTIME_DATA_DIR, DEFAULT_TEXT_MODEL, DEFAULT_TMP_DIR, settings
+from aistudio_api.config import DEFAULT_IMAGE_MODEL, DEFAULT_RUNTIME_DATA_DIR, DEFAULT_TEXT_MODEL, DEFAULT_TMP_DIR, DEFAULT_WARMUP_TEXT_MODEL, settings
 
 router = APIRouter()
 
@@ -51,6 +51,7 @@ CONFIG_CATEGORIES = (
 CONFIG_OPTIONS: tuple[ConfigOption, ...] = (
     ConfigOption("AISTUDIO_USE_PURE_HTTP", "Pure HTTP 模式", "runtime", "运行模式", "bool", False, "启用实验性纯 HTTP 请求路径；开启后不启动浏览器，也会跳过账号浏览器预热。", "use_pure_http"),
     ConfigOption("AISTUDIO_DEFAULT_TEXT_MODEL", "默认文本模型", "runtime", "运行模式", "string", "gemma-4-31b-it", "CLI 和内部默认文本模型。"),
+    ConfigOption("AISTUDIO_WARMUP_TEXT_MODEL", "预热文本模型", "runtime", "运行模式", "string", "gemini-3-flash-preview", "启动账号浏览器预热时用于捕获可复用文本请求模板的模型。"),
     ConfigOption("AISTUDIO_DEFAULT_IMAGE_MODEL", "默认图片模型", "runtime", "运行模式", "string", "gemini-3.1-flash-image-preview", "未显式指定时使用的图片模型。"),
     ConfigOption("AISTUDIO_MAX_CONCURRENCY", "最大并发", "runtime", "运行模式", "int", 3, "后端请求并发信号量大小。", "max_concurrency", minimum=1, maximum=100),
     ConfigOption("AISTUDIO_PORT", "API 服务端口", "server", "服务与浏览器", "int", 8080, "FastAPI 服务监听端口。", "port", minimum=1, maximum=65535),
@@ -74,6 +75,7 @@ CONFIG_OPTIONS: tuple[ConfigOption, ...] = (
     ConfigOption("AISTUDIO_GENERATED_IMAGES_ROUTE", "生成图片路由", "storage", "存储路径", "string", "/generated-images", "生成图片静态访问路由。", "generated_images_route"),
     ConfigOption("AISTUDIO_IMAGE_SESSIONS_DIR", "图片会话目录", "storage", "存储路径", "path", str(DEFAULT_RUNTIME_DATA_DIR / "image-sessions"), "图片 Studio 会话保存目录。", "image_sessions_dir"),
     ConfigOption("AISTUDIO_LOCAL_STUDIO_DIR", "Local Studio 目录", "storage", "存储路径", "path", str(DEFAULT_RUNTIME_DATA_DIR / "local-studio"), "Local Studio 会话、附件和缓存目录。", "local_studio_dir"),
+    ConfigOption("AISTUDIO_PROVIDER_MANAGER_DIR", "Provider Manager 目录", "storage", "存储路径", "path", str(DEFAULT_RUNTIME_DATA_DIR / "provider-manager"), "Provider Manager provider registry、credential references、model catalog 和 audit 记录目录。", "provider_manager_dir"),
     ConfigOption("AISTUDIO_ACCOUNTS_DIR", "账号目录", "storage", "存储路径", "path", "", "账号元数据和授权状态目录。", "accounts_dir"),
     ConfigOption("AISTUDIO_DUMP_RAW_RESPONSE", "转储原始响应", "storage", "存储路径", "bool", False, "调试时保存上游原始响应。", "dump_raw_response"),
     ConfigOption("AISTUDIO_DUMP_RAW_RESPONSE_DIR", "原始响应目录", "storage", "存储路径", "path", "/tmp", "原始响应转储目录。", "dump_raw_response_dir"),
@@ -151,6 +153,8 @@ def _coerce_config_value(option: ConfigOption, raw_value: Any) -> tuple[Any, str
 def _current_config_value(option: ConfigOption) -> Any:
     if option.key == "AISTUDIO_DEFAULT_TEXT_MODEL":
         return DEFAULT_TEXT_MODEL
+    if option.key == "AISTUDIO_WARMUP_TEXT_MODEL":
+        return DEFAULT_WARMUP_TEXT_MODEL
     if option.key == "AISTUDIO_DEFAULT_IMAGE_MODEL":
         return DEFAULT_IMAGE_MODEL
     if option.settings_attr:

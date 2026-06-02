@@ -30,6 +30,8 @@ def test_config_route_lists_allowlisted_runtime_settings(tmp_path, monkeypatch):
     assert pure_http["default_value"] is False
     assert "跳过账号浏览器预热" in pure_http["description"]
     assert "AISTUDIO_DEFAULT_TEXT_MODEL" in keys
+    assert "AISTUDIO_WARMUP_TEXT_MODEL" in keys
+    assert "AISTUDIO_PROVIDER_MANAGER_DIR" in keys
     assert "AISTUDIO_ACCOUNT_ROTATION_MODE" not in keys
     assert "AISTUDIO_AUTH_FILE" not in keys
     assert "AISTUDIO_PROXY_SERVER" not in keys

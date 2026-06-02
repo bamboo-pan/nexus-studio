@@ -18,7 +18,9 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [],
+  "children": [
+    "06-01-provider-manager-shared-pool-foundation"
+  ],
   "parent": null,
   "relatedFiles": [],
   "notes": "",

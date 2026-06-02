@@ -78,6 +78,7 @@ export AISTUDIO_LOCAL_STUDIO_DIR="$RUN_ROOT/data/local-studio"
 export AISTUDIO_REQUEST_LOGS_DIR="$RUN_ROOT/data/request-logs"
 export AISTUDIO_GENERATED_IMAGES_DIR="$RUN_ROOT/data/generated-images"
 export AISTUDIO_IMAGE_SESSIONS_DIR="$RUN_ROOT/data/image-sessions"
+export AISTUDIO_PROVIDER_MANAGER_DIR="$RUN_ROOT/data/provider-manager"
 export OPENAI_COMPAT_KEY_FILE=/mnt/c/Users/bamboo/Documents/github/key.txt
 python main.py
 ```
@@ -196,7 +197,7 @@ Provider Manager 是 provider-model 池的控制面，不是 Local Studio 会话
 | PM-CP-01 | Phase 1+ | Provider Manager UI + API | 从独立 Provider Manager 入口列出内置 Google AI Studio provider，新增/编辑/停用/删除一个自定义 OpenAI-compatible provider | 不需要进入 Local Studio 会话；Google provider 始终存在且无用户 token/base URL；自定义 provider CRUD 后状态一致；删除或停用不会污染既有 Local Studio 会话和基础模块 |
 | PM-CP-02 | Phase 1+ | API + Logs | 保存 provider credential references、加载模型、查看 model catalog、导出 request/audit 记录 | API/UI/log/export 只出现 credential reference 或脱敏摘要；model catalog 包含 provider 归属、model id、能力、上下文、模态、aliases/defaults；无真实 secret、cookie、Authorization 明文 |
 | PM-CP-03 | Phase 1+ | API + UI | 执行 health checks，模拟 disabled、auth_failed、quota_exhausted、degraded、ready provider/model 状态 | 健康状态显示清晰且可审计；health 影响 routing policies 的候选集合；健康失败不自动删除 provider 配置；Local Studio 当前会话只看到可用性或受控错误 |
-| PM-AUDIT-01 | Phase 1+ | Request Logs + Export | 创建、编辑、停用 provider，刷新模型目录，更新 routing policy，执行一次 runtime 请求 | 审计记录包含 actor/action/target/status/time/error 摘要和 request log group；不含 secret；失败配置变更也有受控 audit 记录 |
+| PM-AUDIT-01 | Phase 1+ | Provider Manager API + UI | 创建、编辑、停用 provider，更新模型目录和 aliases/defaults，查看 audit 记录 | 审计记录包含 actor/action/target/status/time/error 摘要；不含 secret；失败配置变更也有受控 audit 记录；runtime attempt/request log group 证据从 Phase 2 shared runtime gateway 开始要求 |
 | PM-DP-01 | Phase 2+ | API clients | 分别通过 OpenAI Responses、OpenAI Chat Completions、Gemini、Claude Messages 和 Local Studio 发送同等文本请求 | 每个 protocol adapter 校验原生请求并生成 canonical request；request log 记录 adapter、canonical fields、selected provider/model、attempt plan；response conversion 返回协议原生格式 |
 | PM-PROTO-01 | Phase 2+ | API + UI | 对 text、stream、tools/functions、search、image input、image generation、reasoning/thinking 逐项运行兼容协议矩阵 | capability matching 阻止不兼容模型；支持能力时保留工具、图像、reasoning、usage 和错误结构；不把 Responses-only、Gemini-only 或 Claude-only 字段串到其他协议 |
 | PM-RT-01 | Phase 2+ | API + Logs | 配置 aliases/defaults 和 priority fallback 链，制造首选 provider 失败后切换候选 | routing decision 确定且可重复；request log 保存 aliases/defaults 解析、candidate list、失败 attempt、fallback attempt、最终 response/error；streaming 已发送 chunk 后不执行破坏语义的 fallback |

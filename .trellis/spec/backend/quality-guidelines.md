@@ -101,6 +101,75 @@ aistudio-api = "aistudio_api.main:main"
 
 <!-- What level of testing is expected -->
 
+### Scenario: Browser Startup Warmup Gates
+
+#### 1. Scope / Trigger
+
+- Trigger: Changing startup browser warmup, account-pool warmup, AI Studio template capture, `/health` warmup status, or the model used to prepare reusable text templates.
+- Scope: `AIStudioClient.warmup`, `RequestCaptureService.warmup`, `BrowserSession` startup-only budgets, FastAPI lifespan warmup, `/health` response, and WSL warmup gate scripts/results.
+
+#### 2. Signatures
+
+- Startup retry owner: `aistudio_api.api.app._warmup_with_retries(warmup, label=..., attempts=..., backoff_seconds=...)`.
+- Client warmup signature: `AIStudioClient.warmup(*, navigation_timeout_ms, chat_ready_timeout_ms, botguard_timeout_ms, template_capture_timeout_ms)`.
+- Capture warmup signature: `RequestCaptureService.warmup(..., retry_template_capture, template_recovery_attempts, navigation_timeout_ms, chat_ready_timeout_ms, botguard_timeout_ms, template_capture_timeout_ms)`.
+- Environment keys:
+	- `AISTUDIO_DEFAULT_TEXT_MODEL`: default model for CLI/API requests.
+	- `AISTUDIO_WARMUP_TEXT_MODEL`: model used only to capture the startup reusable text-request template.
+
+#### 3. Contracts
+
+- `/health.warmup.status == "complete"` means the account browser warmup prepared a reusable text request template, not just that FastAPI is serving HTTP.
+- Startup warmup must use `AISTUDIO_WARMUP_TEXT_MODEL`; do not assume `AISTUDIO_DEFAULT_TEXT_MODEL` is safe for template capture because account/model permissions can differ from the request default.
+- Startup warmup has one retry owner: the app-level `_warmup_with_retries`. Startup capture must disable the inner template retry (`retry_template_capture=False`, `template_recovery_attempts=1`) so attempts remain bounded and observable.
+- Runtime request capture may keep its internal transient recovery retry; do not remove it just to simplify startup behavior.
+- Auth/sign-in/invalid account/validation failures are hard failures and must not be retried as transient navigation problems.
+
+#### 4. Validation & Error Matrix
+
+| Condition | Required handling |
+| --- | --- |
+| `Page.goto`/readiness/template timeout during startup | Retry only through `_warmup_with_retries`, then mark `/health.warmup.status` failed/partial if exhausted. |
+| Google sign-in, missing/invalid auth, unauthorized/forbidden, validation error | Do not retry; surface as hard warmup failure. |
+| Warmup model produces upstream permission denied while another text model can capture | Move the startup template model to `AISTUDIO_WARMUP_TEXT_MODEL`; do not silently change API request defaults. |
+| Direct `AIStudioClient.warmup` or direct lifespan probe passes but `/health` gate fails | Record as a blocker; do not claim complete system-test pass. |
+| Provider Manager-only Phase 1 smoke passes while global Google warmup fails | Record Provider Manager pass separately and keep global system status blocked. |
+
+#### 5. Good/Base/Bad Cases
+
+- Good: `AIStudioClient.warmup()` captures `AISTUDIO_WARMUP_TEXT_MODEL`, disables inner startup retries, and `/health` reaches `complete` only after template readiness.
+- Base: Unit tests assert startup capture kwargs, retry attempt counts, transient classification, and hard auth behavior.
+- Bad: Wrapping `AIStudioClient.warmup()` in app retries while `RequestCaptureService._ensure_template()` also retries internally for startup, multiplying minutes of hidden retry work.
+
+#### 6. Tests Required
+
+- Unit: classify transient vs hard warmup errors.
+- Unit: startup warmup passes bounded navigation/readiness/template budgets and uses `AISTUDIO_WARMUP_TEXT_MODEL`.
+- Unit: startup warmup does not internally retry template capture and outer retry controls attempt count.
+- Full unit suite after warmup changes.
+- Real WSL: `/health` gate must report `complete` before claiming global system-test pass; preserve artifact root and failure signature if it does not.
+
+#### 7. Wrong vs Correct
+
+Wrong:
+
+```python
+await _warmup_with_retries(client.warmup, label="Account browser")
+# Inside client.warmup, capture warmup still retries template capture internally.
+await capture_service.warmup(model=DEFAULT_TEXT_MODEL)
+```
+
+Correct:
+
+```python
+await _warmup_with_retries(client.warmup, label="Account browser")
+await capture_service.warmup(
+		model=DEFAULT_WARMUP_TEXT_MODEL,
+		retry_template_capture=False,
+		template_recovery_attempts=1,
+)
+```
+
 ### Scenario: Architecture-Driven System Test Plan Updates
 
 #### 1. Scope / Trigger

@@ -4,7 +4,8 @@ import json
 import pytest
 
 from aistudio_api.infrastructure.cache.snapshot_cache import SnapshotCache
-from aistudio_api.config import DEFAULT_TEXT_MODEL
+from aistudio_api.config import DEFAULT_WARMUP_TEXT_MODEL
+from aistudio_api.api.app import _warmup_with_retries
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
 from aistudio_api.infrastructure.gateway.capture import RequestCaptureService
 
@@ -12,10 +13,12 @@ from aistudio_api.infrastructure.gateway.capture import RequestCaptureService
 class FakeBrowserSession:
     def __init__(self):
         self.template_calls = []
+        self.template_kwargs = []
         self.snapshot_calls = []
 
-    async def capture_template(self, model):
+    async def capture_template(self, model, **kwargs):
         self.template_calls.append(model)
+        self.template_kwargs.append(kwargs)
         call_number = len(self.template_calls)
         template_body = json.dumps(
             [
@@ -38,19 +41,36 @@ class FakeBrowserSession:
 
 
 class FlakyNavigationBrowserSession(FakeBrowserSession):
-    async def capture_template(self, model):
+    async def capture_template(self, model, **kwargs):
         if not self.template_calls:
             self.template_calls.append(model)
+            self.template_kwargs.append(kwargs)
             raise RuntimeError('Page.goto: Timeout 60000ms exceeded while navigating to "https://aistudio.google.com/"')
-        return await super().capture_template(model)
+        return await super().capture_template(model, **kwargs)
+
+
+class AlwaysTimeoutWarmupSession(FakeBrowserSession):
+    def __init__(self):
+        super().__init__()
+        self.ensure_context_calls = []
+
+    async def ensure_context(self, **kwargs):
+        self.ensure_context_calls.append(kwargs)
+
+    async def capture_template(self, model, **kwargs):
+        self.template_calls.append(model)
+        self.template_kwargs.append(kwargs)
+        raise RuntimeError(
+            'Page.goto: Timeout 60000ms exceeded. navigating to "https://aistudio.google.com/", waiting until "commit"'
+        )
 
 
 class WarmupSession:
     def __init__(self):
-        self.ensure_context_calls = 0
+        self.ensure_context_calls = []
 
-    async def ensure_context(self):
-        self.ensure_context_calls += 1
+    async def ensure_context(self, **kwargs):
+        self.ensure_context_calls.append(kwargs)
 
 
 class WarmupCaptureService:
@@ -104,6 +124,19 @@ def test_capture_template_retries_transient_aistudio_navigation_failure():
 
     assert captured.headers["x-template-call"] == "2"
     assert session.template_calls == ["gemini-3.1-flash-lite", "gemini-3.1-flash-lite"]
+    assert session.template_kwargs == [{}, {}]
+
+
+def test_capture_warmup_can_disable_internal_template_retry():
+    session = FlakyNavigationBrowserSession()
+    service = RequestCaptureService(session, SnapshotCache(ttl=60, max_size=10))
+
+    with pytest.raises(RuntimeError, match="Page.goto"):
+        asyncio.run(service.warmup(prompt="1", model="gemini-3.1-flash-lite", retry_template_capture=False))
+
+    assert session.template_calls == ["gemini-3.1-flash-lite"]
+    assert session.template_kwargs == [{}]
+    assert session.snapshot_calls == []
 
 
 def test_capture_warmup_does_not_store_reusable_prompt_snapshot():
@@ -144,8 +177,19 @@ def test_client_warmup_prepares_default_text_capture_template():
 
         asyncio.run(client.warmup())
 
-        assert session.ensure_context_calls == 1
-        assert capture_service.warmup_calls == [{"prompt": "1", "model": DEFAULT_TEXT_MODEL}]
+        assert session.ensure_context_calls == [{"navigation_timeout_ms": 30000, "chat_ready_timeout_ms": 30000}]
+        assert capture_service.warmup_calls == [
+            {
+                "prompt": "1",
+                "model": DEFAULT_WARMUP_TEXT_MODEL,
+                "retry_template_capture": False,
+                "navigation_timeout_ms": 30000,
+                "chat_ready_timeout_ms": 30000,
+                "botguard_timeout_ms": 15000,
+                "template_capture_timeout_ms": 30000,
+                "template_recovery_attempts": 1,
+            }
+        ]
     finally:
         if original_session is not None:
             original_session._executor.shutdown(wait=False)
@@ -162,7 +206,43 @@ def test_client_warmup_propagates_template_warmup_failure():
         with pytest.raises(RuntimeError, match="template warmup failed"):
             asyncio.run(client.warmup())
 
-        assert session.ensure_context_calls == 1
+        assert len(session.ensure_context_calls) == 1
+    finally:
+        client._session = None
+        if original_session is not None:
+            original_session._executor.shutdown(wait=False)
+
+
+def test_startup_warmup_outer_retry_controls_template_attempt_count():
+    session = AlwaysTimeoutWarmupSession()
+    client = AIStudioClient(port=1)
+    original_session = client._session
+    sleeps = []
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    try:
+        client._session = session
+        client._capture_service = RequestCaptureService(session, SnapshotCache(ttl=60, max_size=10))
+
+        with pytest.raises(RuntimeError, match="Page.goto"):
+            asyncio.run(_warmup_with_retries(client.warmup, label="test", attempts=3, backoff_seconds=(0.1, 0.2), sleep=sleep))
+
+        expected_context_kwargs = {"navigation_timeout_ms": 30000, "chat_ready_timeout_ms": 30000}
+        expected_template_kwargs = {
+            "navigation_timeout_ms": 30000,
+            "chat_ready_timeout_ms": 30000,
+            "botguard_timeout_ms": 15000,
+            "template_capture_timeout_ms": 30000,
+            "template_recovery_attempts": 1,
+        }
+
+        assert session.ensure_context_calls == [expected_context_kwargs, expected_context_kwargs, expected_context_kwargs]
+        assert session.template_calls == [DEFAULT_WARMUP_TEXT_MODEL, DEFAULT_WARMUP_TEXT_MODEL, DEFAULT_WARMUP_TEXT_MODEL]
+        assert session.template_kwargs == [expected_template_kwargs, expected_template_kwargs, expected_template_kwargs]
+        assert session.snapshot_calls == []
+        assert sleeps == [0.1, 0.2]
     finally:
         client._session = None
         if original_session is not None:

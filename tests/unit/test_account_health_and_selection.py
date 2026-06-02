@@ -4,9 +4,16 @@ import logging
 from datetime import datetime, timezone
 
 import httpx
+import pytest
 from fastapi import FastAPI
 
-from aistudio_api.api.app import _account_pool_warmup_account_ids, _should_start_account_pool_warmup, _should_start_background_warmup
+from aistudio_api.api.app import (
+    _account_pool_warmup_account_ids,
+    _is_transient_warmup_error,
+    _should_start_account_pool_warmup,
+    _should_start_background_warmup,
+    _warmup_with_retries,
+)
 from aistudio_api.api.dependencies import get_account_service
 from aistudio_api.api.routes_accounts import router as accounts_router
 from aistudio_api.api.schemas import ChatRequest, ImageRequest, Message
@@ -122,6 +129,80 @@ def test_account_pool_warmup_candidates_skip_isolated_accounts(tmp_path):
         rotation_mode="exhaustion",
         warmup_limit=2,
     ) == [premium.id]
+
+
+def test_warmup_retry_classifies_navigation_timeout_only_as_transient():
+    timeout = RuntimeError(
+        'Page.goto: Timeout 60000ms exceeded. navigating to "https://aistudio.google.com/", waiting until "commit"'
+    )
+
+    assert _is_transient_warmup_error(timeout) is True
+    assert _is_transient_warmup_error(RuntimeError("template capture timeout for model=gemini-3.1-flash-lite")) is True
+    assert _is_transient_warmup_error(RuntimeError("BotGuardService capture timeout")) is True
+    assert _is_transient_warmup_error(RuntimeError("AI Studio chat runtime not ready after navigating to https://aistudio.google.com/")) is True
+    assert _is_transient_warmup_error(RuntimeError("Google sign-in auth state is missing or invalid")) is False
+    assert _is_transient_warmup_error(RuntimeError("GenerateContent permission denied. Please try again.")) is False
+    assert _is_transient_warmup_error(RuntimeError("invalid account auth message")) is False
+    assert _is_transient_warmup_error(ValueError("validation failed")) is False
+
+
+def test_warmup_with_retries_succeeds_after_transient_navigation_timeout():
+    calls = 0
+    sleeps = []
+
+    async def warmup():
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise RuntimeError(
+                'Page.goto: Timeout 60000ms exceeded. navigating to "https://aistudio.google.com/", waiting until "commit"'
+            )
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    asyncio.run(_warmup_with_retries(warmup, label="test", attempts=3, backoff_seconds=(0.1, 0.2), sleep=sleep))
+
+    assert calls == 3
+    assert sleeps == [0.1, 0.2]
+
+
+def test_warmup_with_retries_keeps_auth_failure_hard():
+    calls = 0
+
+    async def warmup():
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("AI Studio redirected to Google sign-in; browser auth state is missing or invalid")
+
+    async def sleep(delay):
+        raise AssertionError(f"unexpected retry sleep: {delay}")
+
+    with pytest.raises(RuntimeError, match="Google sign-in"):
+        asyncio.run(_warmup_with_retries(warmup, label="test", attempts=3, backoff_seconds=(0.1, 0.2), sleep=sleep))
+
+    assert calls == 1
+
+
+def test_warmup_with_retries_raises_after_transient_attempts_exhausted():
+    calls = 0
+    sleeps = []
+
+    async def warmup():
+        nonlocal calls
+        calls += 1
+        raise RuntimeError(
+            'Page.goto: Timeout 60000ms exceeded. navigating to "https://aistudio.google.com/", waiting until "commit"'
+        )
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    with pytest.raises(RuntimeError, match="Page.goto"):
+        asyncio.run(_warmup_with_retries(warmup, label="test", attempts=3, backoff_seconds=(0.1, 0.2), sleep=sleep))
+
+    assert calls == 3
+    assert sleeps == [0.1, 0.2]
 
 
 def test_health_response_exposes_warmup_status():

@@ -51,9 +51,28 @@ class RequestCaptureService:
     def clear_templates(self) -> None:
         self._templates.clear()
 
-    async def warmup(self, prompt: str = "1", model: str = DEFAULT_TEXT_MODEL) -> None:
+    async def warmup(
+        self,
+        prompt: str = "1",
+        model: str = DEFAULT_TEXT_MODEL,
+        *,
+        retry_template_capture: bool = True,
+        navigation_timeout_ms: int | None = None,
+        chat_ready_timeout_ms: int | None = None,
+        botguard_timeout_ms: int | None = None,
+        template_capture_timeout_ms: int | None = None,
+        template_recovery_attempts: int | None = None,
+    ) -> None:
         capture_model = resolve_aistudio_wire_model(model)
-        await self._ensure_template(capture_model)
+        await self._ensure_template(
+            capture_model,
+            retry_transient=retry_template_capture,
+            navigation_timeout_ms=navigation_timeout_ms,
+            chat_ready_timeout_ms=chat_ready_timeout_ms,
+            botguard_timeout_ms=botguard_timeout_ms,
+            template_capture_timeout_ms=template_capture_timeout_ms,
+            template_recovery_attempts=template_recovery_attempts,
+        )
         await self._session.generate_snapshot([self._build_capture_content(prompt=prompt, images=None)])
 
     async def capture(
@@ -103,17 +122,40 @@ class RequestCaptureService:
         )
         return captured
 
-    async def _ensure_template(self, model: str) -> CapturedRequest:
+    async def _ensure_template(
+        self,
+        model: str,
+        *,
+        retry_transient: bool = True,
+        navigation_timeout_ms: int | None = None,
+        chat_ready_timeout_ms: int | None = None,
+        botguard_timeout_ms: int | None = None,
+        template_capture_timeout_ms: int | None = None,
+        template_recovery_attempts: int | None = None,
+    ) -> CapturedRequest:
         if model in self._templates:
             return self._templates[model]
 
+        capture_kwargs = {}
+        if navigation_timeout_ms is not None:
+            capture_kwargs["navigation_timeout_ms"] = navigation_timeout_ms
+        if chat_ready_timeout_ms is not None:
+            capture_kwargs["chat_ready_timeout_ms"] = chat_ready_timeout_ms
+        if botguard_timeout_ms is not None:
+            capture_kwargs["botguard_timeout_ms"] = botguard_timeout_ms
+        if template_capture_timeout_ms is not None:
+            capture_kwargs["template_capture_timeout_ms"] = template_capture_timeout_ms
+        if template_recovery_attempts is not None:
+            capture_kwargs["template_recovery_attempts"] = template_recovery_attempts
+
         captured = None
-        for attempt in range(2):
+        max_attempts = 2 if retry_transient else 1
+        for attempt in range(max_attempts):
             try:
-                captured = await self._session.capture_template(model)
+                captured = await self._session.capture_template(model, **capture_kwargs)
                 break
             except Exception as exc:
-                if attempt or not _is_transient_aistudio_capture_error(exc):
+                if attempt + 1 >= max_attempts or not _is_transient_aistudio_capture_error(exc):
                     raise
                 logger.warning("AI Studio template capture failed during navigation/readiness; retrying once: %s", exc)
         if captured is None:

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import time
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -26,12 +27,106 @@ from .routes_generated_images import register_generated_image_routes
 from .routes_image_sessions import router as image_sessions_router
 from .routes_local_studio import router as local_studio_router
 from .routes_openai import router as openai_router
+from .routes_provider_manager import router as provider_manager_router
 from .routes_request_logs import router as request_logs_router
 from .routes_system import router as system_router
 from .state import runtime_state
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("aistudio.server")
+
+_WARMUP_RETRY_ATTEMPTS = 3
+_WARMUP_RETRY_BACKOFF_SECONDS = (2.0, 5.0)
+
+
+def _is_validation_error(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    while current is not None:
+        if "ValidationError" in type(current).__name__:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _is_transient_warmup_error(exc: BaseException) -> bool:
+    if isinstance(exc, (ValueError, TypeError)) or _is_validation_error(exc):
+        return False
+
+    message = str(exc).lower()
+    hard_markers = (
+        "google sign-in",
+        "sign in to",
+        "not signed in",
+        "login required",
+        "auth state",
+        "missing auth",
+        "invalid account",
+        "invalid auth",
+        "permission denied",
+        "unauthorized",
+        "forbidden",
+        "validation error",
+    )
+    if any(marker in message for marker in hard_markers):
+        return False
+
+    exc_type = type(exc)
+    if exc_type.__module__.startswith("playwright") and "timeouterror" in exc_type.__name__.lower():
+        return True
+
+    readiness_markers = (
+        "ai studio chat runtime not ready",
+        "ai studio image runtime not ready",
+    )
+    if any(marker in message for marker in readiness_markers):
+        return True
+
+    timeout_markers = (
+        "page.goto: timeout",
+        "navigation timeout",
+        "template capture timeout",
+        "botguardservice capture timeout",
+        "waiting until \"commit\"",
+        "timeout 60000ms exceeded",
+        "aistudio.google.com/",
+    )
+    return "timeout" in message and any(marker in message for marker in timeout_markers)
+
+
+def _warmup_retry_delay(attempt: int, backoff_seconds: tuple[float, ...]) -> float:
+    if not backoff_seconds:
+        return 0.0
+    return backoff_seconds[min(attempt - 1, len(backoff_seconds) - 1)]
+
+
+async def _warmup_with_retries(
+    warmup: Callable[[], Awaitable[None]],
+    *,
+    label: str,
+    attempts: int = _WARMUP_RETRY_ATTEMPTS,
+    backoff_seconds: tuple[float, ...] = _WARMUP_RETRY_BACKOFF_SECONDS,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    last_attempt = max(1, attempts)
+    for attempt in range(1, last_attempt + 1):
+        try:
+            await warmup()
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if attempt >= last_attempt or not _is_transient_warmup_error(exc):
+                raise
+            delay = _warmup_retry_delay(attempt, backoff_seconds)
+            logger.warning(
+                "%s warmup hit transient AI Studio navigation timeout on attempt %d/%d; retrying in %.1fs: %s",
+                label,
+                attempt,
+                last_attempt,
+                delay,
+                exc,
+            )
+            await sleep(delay)
 
 
 def _should_start_background_warmup(*, use_pure_http: bool, account_count: int) -> bool:
@@ -75,8 +170,6 @@ def _account_pool_warmup_account_ids(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    import asyncio
-
     from aistudio_api.config import settings
     from aistudio_api.infrastructure.account.account_store import AccountStore
     from aistudio_api.infrastructure.account.login_service import LoginService
@@ -154,7 +247,7 @@ async def lifespan(app: FastAPI):
             runtime_state.warmup_completed_accounts = []
             runtime_state.warmup_failed_accounts = []
             try:
-                await client.warmup()
+                await _warmup_with_retries(client.warmup, label="Default browser")
                 runtime_state.warmup_completed_accounts = ["default"]
                 runtime_state.warmup_status = "complete"
             except Exception as e:
@@ -184,7 +277,7 @@ async def lifespan(app: FastAPI):
                     if account_client is None:
                         runtime_state.warmup_failed_accounts = [*runtime_state.warmup_failed_accounts, account_id]
                         continue
-                    await account_client.warmup()
+                    await _warmup_with_retries(account_client.warmup, label=f"Account browser {account_id}")
                     runtime_state.warmup_completed_accounts = [*runtime_state.warmup_completed_accounts, account_id]
                     logger.info("Account browser warmup completed: account=%s", account_id)
                 except asyncio.CancelledError:
@@ -380,6 +473,7 @@ app.include_router(openai_router)
 app.include_router(accounts_router)
 app.include_router(image_sessions_router)
 app.include_router(local_studio_router)
+app.include_router(provider_manager_router)
 app.include_router(request_logs_router)
 register_generated_image_routes(app)
 
