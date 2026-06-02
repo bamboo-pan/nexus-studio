@@ -28,8 +28,12 @@ AI_STUDIO_HOME_URL = "https://aistudio.google.com/"
 AI_STUDIO_HOST = "aistudio.google.com"
 AI_DEVELOPERS_HOST = "ai.google.dev"
 AI_STUDIO_CHAT_PATH_PREFIXES = ("/prompts/", "/app/prompts/")
+AI_STUDIO_NAVIGATION_TIMEOUT_MS = 60_000
 AI_STUDIO_CHAT_READY_TIMEOUT_MS = 90_000
 AI_STUDIO_CHAT_READY_POLL_MS = 1_000
+AI_STUDIO_BOTGUARD_CAPTURE_TIMEOUT_MS = 45_000
+AI_STUDIO_TEMPLATE_CAPTURE_TIMEOUT_MS = 30_000
+AI_STUDIO_TEMPLATE_CAPTURE_POLL_MS = 100
 AI_STUDIO_SEND_BUTTON_SELECTORS = (
     "button:has-text('Run')",
     "button:has-text('Send')",
@@ -435,8 +439,15 @@ class BrowserSession:
         self._botguard_lock = asyncio.Lock()
         self._snapshot_lock = asyncio.Lock()
 
-    async def ensure_context(self):
-        return await self._run_sync(self._ensure_browser_sync)
+    async def ensure_context(
+        self,
+        *,
+        navigation_timeout_ms: int | None = None,
+        chat_ready_timeout_ms: int | None = None,
+    ):
+        if navigation_timeout_ms is None and chat_ready_timeout_ms is None:
+            return await self._run_sync(self._ensure_browser_sync)
+        return await self._run_sync(self._ensure_browser_sync, navigation_timeout_ms, chat_ready_timeout_ms)
 
     async def switch_auth(self, auth_file: str | None) -> None:
         await self._run_sync(self._switch_auth_sync, auth_file)
@@ -458,8 +469,33 @@ class BrowserSession:
         await self._run_sync(self._ensure_botguard_service_sync)
         return True
 
-    async def capture_template(self, model: str) -> dict[str, Any]:
-        return await self._run_sync(self._capture_template_sync, model)
+    async def capture_template(
+        self,
+        model: str,
+        *,
+        navigation_timeout_ms: int | None = None,
+        chat_ready_timeout_ms: int | None = None,
+        botguard_timeout_ms: int | None = None,
+        template_capture_timeout_ms: int | None = None,
+        template_recovery_attempts: int | None = None,
+    ) -> dict[str, Any]:
+        if (
+            navigation_timeout_ms is None
+            and chat_ready_timeout_ms is None
+            and botguard_timeout_ms is None
+            and template_capture_timeout_ms is None
+            and template_recovery_attempts is None
+        ):
+            return await self._run_sync(self._capture_template_sync, model)
+        return await self._run_sync(
+            self._capture_template_sync,
+            model,
+            navigation_timeout_ms,
+            chat_ready_timeout_ms,
+            botguard_timeout_ms,
+            template_capture_timeout_ms,
+            template_recovery_attempts,
+        )
 
     async def list_available_models(self) -> list[str]:
         return await self._run_sync(self._list_available_models_sync)
@@ -729,7 +765,7 @@ class BrowserSession:
         self._browser = self._cf.__enter__()
         return self._browser
 
-    def _ensure_browser_sync(self):
+    def _ensure_browser_sync(self, navigation_timeout_ms: int | None = None, chat_ready_timeout_ms: int | None = None):
         if self._ctx is not None and self._hook_page is not None and not self._hook_page.is_closed():
             return self._ctx
 
@@ -741,7 +777,11 @@ class BrowserSession:
         self._ctx = self._new_context_sync()
         self._hook_page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
         log.debug(f"[timing] browser launched in {_t.time()-_t0:.1f}s")
-        self._goto_aistudio_sync(self._hook_page)
+        self._goto_aistudio_with_options_sync(
+            self._hook_page,
+            navigation_timeout_ms=navigation_timeout_ms,
+            chat_ready_timeout_ms=chat_ready_timeout_ms,
+        )
         log.debug(f"[timing] page loaded in {_t.time()-_t0:.1f}s")
         self._install_hooks_sync(self._hook_page)
         log.debug(f"[timing] hooks installed in {_t.time()-_t0:.1f}s")
@@ -789,20 +829,38 @@ class BrowserSession:
         if cookies:
             ctx.add_cookies(cookies)
 
-    def _ensure_hook_page_sync(self):
-        self._ensure_browser_sync()
+    def _ensure_hook_page_sync(self, navigation_timeout_ms: int | None = None, chat_ready_timeout_ms: int | None = None):
+        if navigation_timeout_ms is None and chat_ready_timeout_ms is None:
+            self._ensure_browser_sync()
+        else:
+            self._ensure_browser_sync(navigation_timeout_ms, chat_ready_timeout_ms)
         if not self._is_chat_runtime_ready_sync(self._hook_page):
             log.debug("hook page not chat-ready before install: %s", self._format_chat_runtime_diagnostics_sync(self._hook_page))
-            self._goto_aistudio_sync(self._hook_page)
+            self._goto_aistudio_with_options_sync(
+                self._hook_page,
+                navigation_timeout_ms=navigation_timeout_ms,
+                chat_ready_timeout_ms=chat_ready_timeout_ms,
+            )
         if self._complete_aistudio_onboarding_sync(self._hook_page):
-            self._wait_for_chat_runtime_sync(self._hook_page)
+            self._wait_for_chat_runtime_sync(
+                self._hook_page,
+                timeout_ms=chat_ready_timeout_ms or AI_STUDIO_CHAT_READY_TIMEOUT_MS,
+            )
         self._install_hooks_sync(self._hook_page)
         return self._hook_page
 
-    def _ensure_botguard_service_sync(self):
+    def _ensure_botguard_service_sync(
+        self,
+        navigation_timeout_ms: int | None = None,
+        chat_ready_timeout_ms: int | None = None,
+        botguard_timeout_ms: int | None = None,
+    ):
         import time as _t
         _t0 = _t.time()
-        page = self._ensure_hook_page_sync()
+        page = self._ensure_hook_page_with_options_sync(
+            navigation_timeout_ms=navigation_timeout_ms,
+            chat_ready_timeout_ms=chat_ready_timeout_ms,
+        )
         if page.evaluate("mw:!!window.__bg_service"):
             log.debug(f"[timing] botguard cached, took {_t.time()-_t0:.1f}s")
             return page
@@ -838,7 +896,9 @@ class BrowserSession:
             if not self._click_run_button_sync(page):
                 raise RuntimeError("failed to trigger send while capturing BotGuardService")
 
-            for i in range(45):
+            botguard_wait_ms = botguard_timeout_ms or AI_STUDIO_BOTGUARD_CAPTURE_TIMEOUT_MS
+            attempts = max(1, (botguard_wait_ms + 999) // 1000)
+            for i in range(attempts):
                 page.wait_for_timeout(1000)
                 if page.evaluate("mw:!!window.__bg_service"):
                     self._wait_until_idle_sync(page)
@@ -849,7 +909,15 @@ class BrowserSession:
 
         raise RuntimeError("BotGuardService capture timeout")
 
-    def _capture_template_sync(self, model: str) -> dict[str, Any]:
+    def _capture_template_sync(
+        self,
+        model: str,
+        navigation_timeout_ms: int | None = None,
+        chat_ready_timeout_ms: int | None = None,
+        botguard_timeout_ms: int | None = None,
+        template_capture_timeout_ms: int | None = None,
+        template_recovery_attempts: int | None = None,
+    ) -> dict[str, Any]:
         import time as _t
         _t0 = _t.time()
         if model in self._templates:
@@ -857,21 +925,50 @@ class BrowserSession:
             return self._templates[model]
 
         if self._is_image_model(model):
-            page = self._ensure_hook_page_sync()
+            page = self._ensure_hook_page_with_options_sync(
+                navigation_timeout_ms=navigation_timeout_ms,
+                chat_ready_timeout_ms=chat_ready_timeout_ms,
+            )
             self._prepare_model_onboarding_sync(page, model)
             self._install_hooks_sync(page)
-            captured = self._capture_template_request_with_recovery_sync(page, model)
+            captured = self._capture_template_request_with_recovery_sync(
+                page,
+                model,
+                navigation_timeout_ms=navigation_timeout_ms,
+                chat_ready_timeout_ms=chat_ready_timeout_ms,
+                template_capture_timeout_ms=template_capture_timeout_ms,
+                recovery_attempts=template_recovery_attempts,
+            )
             if not page.evaluate("mw:!!window.__bg_service"):
-                self._goto_aistudio_sync(page)
+                self._goto_aistudio_with_options_sync(
+                    page,
+                    navigation_timeout_ms=navigation_timeout_ms,
+                    chat_ready_timeout_ms=chat_ready_timeout_ms,
+                )
                 self._install_hooks_sync(page)
-                self._ensure_botguard_service_sync()
+                self._ensure_botguard_service_with_options_sync(
+                    navigation_timeout_ms=navigation_timeout_ms,
+                    chat_ready_timeout_ms=chat_ready_timeout_ms,
+                    botguard_timeout_ms=botguard_timeout_ms,
+                )
             self._templates[model] = captured
             log.debug(f"[timing] image template captured for {model} in {_t.time()-_t0:.1f}s")
             return captured
 
-        page = self._ensure_botguard_service_sync()
+        page = self._ensure_botguard_service_with_options_sync(
+            navigation_timeout_ms=navigation_timeout_ms,
+            chat_ready_timeout_ms=chat_ready_timeout_ms,
+            botguard_timeout_ms=botguard_timeout_ms,
+        )
         log.debug(f"[timing] botguard done in {_t.time()-_t0:.1f}s, starting template capture")
-        captured = self._capture_template_request_with_recovery_sync(page, model)
+        captured = self._capture_template_request_with_recovery_sync(
+            page,
+            model,
+            navigation_timeout_ms=navigation_timeout_ms,
+            chat_ready_timeout_ms=chat_ready_timeout_ms,
+            template_capture_timeout_ms=template_capture_timeout_ms,
+            recovery_attempts=template_recovery_attempts,
+        )
         self._templates[model] = captured
         log.debug(f"[timing] template captured for {model} in {_t.time()-_t0:.1f}s")
         return captured
@@ -879,7 +976,7 @@ class BrowserSession:
     def _is_image_model(self, model: str) -> bool:
         return "image" in (model or "").lower()
 
-    def _capture_template_request_sync(self, page, model: str) -> dict[str, Any]:
+    def _capture_template_request_sync(self, page, model: str, *, timeout_ms: int = AI_STUDIO_TEMPLATE_CAPTURE_TIMEOUT_MS) -> dict[str, Any]:
         captured: dict[str, Any] = {}
         route_pattern = "**/*"
         observed: list[str] = []
@@ -914,10 +1011,11 @@ class BrowserSession:
             if not self._click_run_button_sync(page):
                 raise RuntimeError("failed to trigger send during template capture")
 
-            for _ in range(300):
+            attempts = max(1, (timeout_ms + AI_STUDIO_TEMPLATE_CAPTURE_POLL_MS - 1) // AI_STUDIO_TEMPLATE_CAPTURE_POLL_MS)
+            for _ in range(attempts):
                 if captured:
                     break
-                page.wait_for_timeout(100)
+                page.wait_for_timeout(AI_STUDIO_TEMPLATE_CAPTURE_POLL_MS)
             if not captured:
                 suffix = f"; observed={observed}" if observed else ""
                 raise RuntimeError(f"template capture timeout for model={model}{suffix}")
@@ -952,30 +1050,58 @@ class BrowserSession:
             return "models/" in lower_body or "snapshot" in lower_body or "generatecontent" in lower_body
         return False
 
-    def _capture_template_request_with_recovery_sync(self, page, model: str) -> dict[str, Any]:
+    def _capture_template_request_with_recovery_sync(
+        self,
+        page,
+        model: str,
+        *,
+        navigation_timeout_ms: int | None = None,
+        chat_ready_timeout_ms: int | None = None,
+        template_capture_timeout_ms: int | None = None,
+        recovery_attempts: int | None = None,
+    ) -> dict[str, Any]:
         last_error: Exception | None = None
-        for attempt in range(2):
+        max_attempts = max(1, recovery_attempts) if recovery_attempts is not None else 2
+        for attempt in range(max_attempts):
             if not self._is_chat_runtime_ready_sync(page):
-                self._goto_aistudio_sync(page)
+                self._goto_aistudio_with_options_sync(
+                    page,
+                    navigation_timeout_ms=navigation_timeout_ms,
+                    chat_ready_timeout_ms=chat_ready_timeout_ms,
+                )
                 self._install_hooks_sync(page)
             try:
-                return self._capture_template_request_sync(page, model)
+                return self._capture_template_request_with_options_sync(
+                    page,
+                    model,
+                    timeout_ms=template_capture_timeout_ms,
+                )
             except Exception as exc:
                 last_error = exc
                 diagnostics = self._format_chat_runtime_diagnostics_sync(page)
-                if attempt == 0 and not self._is_chat_runtime_ready_sync(page):
+                if attempt + 1 >= max_attempts:
+                    raise
+                if not self._is_chat_runtime_ready_sync(page):
                     log.info("AI Studio page left chat runtime during template capture; reopening before retry: %s", diagnostics)
-                    self._goto_aistudio_sync(page)
+                    self._goto_aistudio_with_options_sync(
+                        page,
+                        navigation_timeout_ms=navigation_timeout_ms,
+                        chat_ready_timeout_ms=chat_ready_timeout_ms,
+                    )
                     self._install_hooks_sync(page)
                     continue
-                if attempt == 0 and self._is_image_model(model):
+                if self._is_image_model(model):
                     log.info("AI Studio image template capture failed; re-opening image model before retry: %s; %s", exc, diagnostics)
                     self._prepare_model_onboarding_sync(page, model)
                     self._install_hooks_sync(page)
                     continue
-                if attempt == 0 and "template capture timeout" in str(exc):
+                if "template capture timeout" in str(exc):
                     log.info("AI Studio template send produced no capture request; reopening before retry: %s; %s", exc, diagnostics)
-                    self._goto_aistudio_sync(page)
+                    self._goto_aistudio_with_options_sync(
+                        page,
+                        navigation_timeout_ms=navigation_timeout_ms,
+                        chat_ready_timeout_ms=chat_ready_timeout_ms,
+                    )
                     self._install_hooks_sync(page)
                     continue
                 raise
@@ -1259,14 +1385,69 @@ mw:((hash) => {
             raise RuntimeError(f"replay failed: {raw_text}")
         return status, raw_text.encode("utf-8")
 
-    def _goto_aistudio_sync(self, page) -> None:
+    def _goto_aistudio_with_options_sync(
+        self,
+        page,
+        *,
+        navigation_timeout_ms: int | None = None,
+        chat_ready_timeout_ms: int | None = None,
+    ) -> None:
+        if navigation_timeout_ms is None and chat_ready_timeout_ms is None:
+            self._goto_aistudio_sync(page)
+            return
+        self._goto_aistudio_sync(
+            page,
+            navigation_timeout_ms=navigation_timeout_ms or AI_STUDIO_NAVIGATION_TIMEOUT_MS,
+            chat_ready_timeout_ms=chat_ready_timeout_ms or AI_STUDIO_CHAT_READY_TIMEOUT_MS,
+        )
+
+    def _ensure_hook_page_with_options_sync(
+        self,
+        *,
+        navigation_timeout_ms: int | None = None,
+        chat_ready_timeout_ms: int | None = None,
+    ):
+        if navigation_timeout_ms is None and chat_ready_timeout_ms is None:
+            return self._ensure_hook_page_sync()
+        return self._ensure_hook_page_sync(
+            navigation_timeout_ms=navigation_timeout_ms,
+            chat_ready_timeout_ms=chat_ready_timeout_ms,
+        )
+
+    def _ensure_botguard_service_with_options_sync(
+        self,
+        *,
+        navigation_timeout_ms: int | None = None,
+        chat_ready_timeout_ms: int | None = None,
+        botguard_timeout_ms: int | None = None,
+    ):
+        if navigation_timeout_ms is None and chat_ready_timeout_ms is None and botguard_timeout_ms is None:
+            return self._ensure_botguard_service_sync()
+        return self._ensure_botguard_service_sync(
+            navigation_timeout_ms=navigation_timeout_ms,
+            chat_ready_timeout_ms=chat_ready_timeout_ms,
+            botguard_timeout_ms=botguard_timeout_ms,
+        )
+
+    def _capture_template_request_with_options_sync(self, page, model: str, *, timeout_ms: int | None = None) -> dict[str, Any]:
+        if timeout_ms is None:
+            return self._capture_template_request_sync(page, model)
+        return self._capture_template_request_sync(page, model, timeout_ms=timeout_ms)
+
+    def _goto_aistudio_sync(
+        self,
+        page,
+        *,
+        navigation_timeout_ms: int = AI_STUDIO_NAVIGATION_TIMEOUT_MS,
+        chat_ready_timeout_ms: int = AI_STUDIO_CHAT_READY_TIMEOUT_MS,
+    ) -> None:
         import time as _t
         last_error = None
         for url in (AI_STUDIO_URL, AI_STUDIO_URL_FALLBACK, AI_STUDIO_HOME_URL):
             route_started_at = _t.time()
             goto_error = None
             try:
-                page.goto(url, wait_until="commit", timeout=60000)
+                page.goto(url, wait_until="commit", timeout=navigation_timeout_ms)
                 log.debug(f"[timing] goto {url} took {_t.time()-route_started_at:.1f}s")
             except Exception as exc:
                 goto_error = exc
@@ -1289,7 +1470,7 @@ mw:((hash) => {
                     last_error = RuntimeError(f"AI Studio redirected to docs after navigating to {url}: {current_url}")
                     continue
                 try:
-                    page.goto(AI_STUDIO_URL_FALLBACK, wait_until="commit", timeout=60000)
+                    page.goto(AI_STUDIO_URL_FALLBACK, wait_until="commit", timeout=navigation_timeout_ms)
                     page.wait_for_timeout(2500)
                     current_url = getattr(page, "url", "")
                 except Exception as exc:
@@ -1299,9 +1480,9 @@ mw:((hash) => {
             if goto_error is not None and not self._is_aistudio_url(current_url):
                 continue
 
-            if self._wait_for_chat_runtime_sync(page):
+            if self._wait_for_chat_runtime_sync(page, timeout_ms=chat_ready_timeout_ms):
                 if self._complete_aistudio_onboarding_sync(page):
-                    self._wait_for_chat_runtime_sync(page)
+                    self._wait_for_chat_runtime_sync(page, timeout_ms=chat_ready_timeout_ms)
                 log.debug(f"[timing] UI ready (dms+textarea) after {_t.time()-route_started_at:.1f}s")
                 return
 
@@ -1391,8 +1572,8 @@ mw:((hash) => {
         state = self._chat_runtime_state_sync(page)
         return bool(state["is_chat_route"] and state["has_default_MakerSuite"] and state["has_textarea"])
 
-    def _wait_for_chat_runtime_sync(self, page) -> bool:
-        attempts = max(1, AI_STUDIO_CHAT_READY_TIMEOUT_MS // AI_STUDIO_CHAT_READY_POLL_MS)
+    def _wait_for_chat_runtime_sync(self, page, *, timeout_ms: int = AI_STUDIO_CHAT_READY_TIMEOUT_MS) -> bool:
+        attempts = max(1, timeout_ms // AI_STUDIO_CHAT_READY_POLL_MS)
         for attempt_index in range(attempts):
             state = self._chat_runtime_state_sync(page)
             if state["is_chat_route"] and state["has_default_MakerSuite"] and state["has_textarea"]:

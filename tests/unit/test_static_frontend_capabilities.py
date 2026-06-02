@@ -175,6 +175,41 @@ def test_static_frontend_exposes_system_config_page():
     assert ".config-metrics" in style_css
 
 
+def test_static_frontend_exposes_provider_manager_page_without_token_state():
+    app_js = (ROOT / "src" / "aistudio_api" / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT / "src" / "aistudio_api" / "static" / "index.html").read_text(encoding="utf-8")
+    style_css = (ROOT / "src" / "aistudio_api" / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert "view==='providers'" in index_html
+    assert "go('providers')" in index_html
+    assert "Provider Manager" in index_html
+    assert "共享 Provider 池" in index_html
+    assert "providerManagerProviders:[]" in app_js
+    assert "providerManagerModels:[]" in app_js
+    assert "providerManagerAudit:[]" in app_js
+    assert "providerManagerApiBase(){return'/api/provider-manager'}" in app_js
+    assert "loadProviderManager()" in app_js
+    assert "saveProviderManagerProvider()" in app_js
+    assert "toggleProviderManagerProvider(provider)" in app_js
+    assert "deleteProviderManagerProvider(provider)" in app_js
+    assert "providerManagerCredentialLabel(provider)" in app_js
+    assert "providerManagerAuditSummary(event)" in app_js
+    assert "`${base}/providers`" in app_js
+    assert "`${base}/model-catalog`" in app_js
+    assert "`${base}/audit`" in app_js
+    assert "x-ref=\"providerManagerToken\"" in index_html
+    assert "x-model=\"providerManagerDraft.token\"" not in index_html
+    assert "token:''" not in app_js
+    assert "finally{this.clearProviderManagerTokenField();this.providerManagerSaving=false}" in app_js
+    assert "providerManagerDraft:{id:'',name:'',enabled:true" in app_js
+    assert "Model Catalog" in index_html
+    assert "Audit" in index_html
+    assert ".provider-workspace" in style_css
+    assert ".provider-row.active" in style_css
+    assert ".provider-model-card" in style_css
+    assert ".provider-audit-card" in style_css
+
+
 def test_static_frontend_exposes_playground_workbench_tools():
     app_js = (ROOT / "src" / "aistudio_api" / "static" / "app.js").read_text(encoding="utf-8")
     index_html = (ROOT / "src" / "aistudio_api" / "static" / "index.html").read_text(encoding="utf-8")
@@ -251,7 +286,7 @@ def test_static_frontend_exposes_local_studio_workbench():
 
     assert "<title>Nexus Studio</title>" in index_html
     assert '<span class="sidebar-title">Nexus Studio</span>' in index_html
-    assert "/static/app.js?v=20260531-stream-rendering" in index_html
+    assert "/static/app.js?v=20260601-provider-manager" in index_html
     assert "OpenAI Local Studio" not in index_html
     assert "view==='studio'" in index_html
     assert "go('studio')" in index_html

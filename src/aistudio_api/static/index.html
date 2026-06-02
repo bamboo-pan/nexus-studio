@@ -27,6 +27,10 @@
       <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10"/><path d="M7 12h5"/><path d="M14 15l2 2 4-5"/></svg>
       <span class="nav-label">Local Studio</span>
     </button>
+    <button class="nav-item" :class="{active:view==='providers'}" @click="go('providers')" title="Provider Manager" aria-label="Provider Manager">
+      <svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/><path d="M12 12l8-4.5"/><path d="M12 12v9"/><path d="M12 12L4 7.5"/></svg>
+      <span class="nav-label">Provider Manager</span>
+    </button>
     <button class="nav-item" :class="{active:view==='images'}" @click="go('images')" title="图片生成" aria-label="图片生成">
       <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
       <span class="nav-label">图片生成</span>
@@ -924,6 +928,134 @@
     </div>
   </div>
 
+  <!-- Provider Manager -->
+  <div class="page-wrap provider-page" :class="{active:view==='providers'}">
+    <div class="scroll-area">
+      <div class="page-pad provider-pad">
+        <div class="account-hero provider-hero">
+          <div>
+            <div class="account-kicker">Provider Manager</div>
+            <h1>共享 Provider 池</h1>
+            <p><span x-text="providerManagerProviders.length+' 个 Provider'"></span><span> · </span><span x-text="providerManagerModels.length+' 个模型目录项'"></span><span> · </span><span x-text="providerManagerAudit.length+' 条审计记录'"></span></p>
+          </div>
+          <div class="account-hero-actions">
+            <button class="btn" :disabled="providerManagerLoading" @click="refreshProviderManager()" x-text="providerManagerLoading?'刷新中':'刷新'">刷新</button>
+            <button class="btn btn-primary" @click="newProviderManagerProvider()">新建 OpenAI Provider</button>
+          </div>
+        </div>
+
+        <div class="provider-metrics">
+          <div class="account-metric"><span>全部</span><strong x-text="providerManagerProviders.length"></strong></div>
+          <div class="account-metric"><span>自定义</span><strong x-text="providerManagerCustomProviders.length"></strong></div>
+          <div class="account-metric"><span>启用</span><strong x-text="providerManagerEnabledCount"></strong></div>
+          <div class="account-metric metric-wide"><span>当前</span><strong x-text="providerManagerSelectedProvider().name||'未选择'"></strong></div>
+        </div>
+
+        <div class="notice notice-error provider-notice" x-show="providerManagerError" x-cloak x-text="providerManagerError"></div>
+
+        <div class="provider-workspace">
+          <section class="account-panel provider-list-panel">
+            <div class="account-panel-head provider-panel-head">
+              <div><h2>Providers</h2><p x-text="providerManagerLoading?'加载中':providerManagerProviders.length+' 个已注册 Provider'"></p></div>
+            </div>
+            <div class="provider-list" x-show="providerManagerProviders.length" x-cloak>
+              <template x-for="provider in providerManagerProviders" :key="provider.id">
+                <button type="button" class="provider-row" :class="{active:providerManagerActiveId===provider.id}" @click="selectProviderManagerProvider(provider)">
+                  <span class="provider-row-main"><strong x-text="provider.name"></strong><small x-text="provider.id"></small></span>
+                  <span class="provider-row-side"><span class="badge" :class="provider.enabled?'badge-green':'badge-gray'" x-text="provider.enabled?'Enabled':'Disabled'"></span><span x-text="providerManagerTypeLabel(provider)"></span></span>
+                </button>
+              </template>
+            </div>
+            <div class="account-empty" x-show="!providerManagerProviders.length&&!providerManagerLoading">暂无 Provider</div>
+          </section>
+
+          <section class="account-panel provider-detail-panel">
+            <div class="account-panel-head provider-panel-head">
+              <div><h2 x-text="providerManagerSelectedProvider().name||'Provider 详情'"></h2><p x-text="providerManagerSelectedProvider().id||'选择一个 Provider 查看详情'"></p></div>
+              <div class="provider-actions" x-show="providerManagerSelectedProvider().id" x-cloak>
+                <button class="btn btn-sm" :disabled="providerManagerSelectedProvider().built_in" @click="editProviderManagerProvider()">编辑</button>
+                <button class="btn btn-sm" :disabled="providerManagerSelectedProvider().built_in||providerManagerSaving" @click="toggleProviderManagerProvider(providerManagerSelectedProvider())" x-text="providerManagerSelectedProvider().enabled?'停用':'启用'"></button>
+                <button class="btn btn-sm btn-danger-outline" :disabled="providerManagerSelectedProvider().built_in||providerManagerSaving" @click="deleteProviderManagerProvider(providerManagerSelectedProvider())">删除</button>
+              </div>
+            </div>
+            <div class="provider-detail" x-show="providerManagerSelectedProvider().id" x-cloak>
+              <div class="provider-detail-grid">
+                <div><span>类型</span><strong x-text="providerManagerTypeLabel(providerManagerSelectedProvider())"></strong></div>
+                <div><span>状态</span><strong x-text="providerManagerSelectedProvider().enabled?'Enabled':'Disabled'"></strong></div>
+                <div><span>健康</span><strong x-text="providerManagerHealthLabel(providerManagerSelectedProvider().health?.status)"></strong></div>
+                <div><span>凭据</span><strong x-text="providerManagerCredentialLabel(providerManagerSelectedProvider())"></strong></div>
+                <div><span>模型</span><strong x-text="providerManagerProviderModels().length"></strong></div>
+                <div><span>Base URL</span><strong x-text="providerManagerSelectedProvider().built_in?'内置':(providerManagerSelectedProvider().base_url||'-')"></strong></div>
+              </div>
+              <div class="provider-code-row">
+                <div><h3>Aliases / Defaults</h3><pre class="request-raw" x-text="jsonPretty({aliases:providerManagerSelectedProvider().aliases||{},defaults:providerManagerSelectedProvider().defaults||{}})"></pre></div>
+                <div><h3>Health</h3><pre class="request-raw" x-text="jsonPretty(providerManagerSelectedProvider().health||{})"></pre></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="account-panel provider-form-panel">
+            <div class="account-panel-head provider-panel-head">
+              <div><h2 x-text="providerManagerDraft.id?'编辑 OpenAI Provider':'新建 OpenAI Provider'"></h2><p x-text="providerManagerDraft.id||'openai-compatible'"></p></div>
+            </div>
+            <div class="provider-form">
+              <label class="account-field provider-field">Name<input type="text" x-model="providerManagerDraft.name" placeholder="OpenAI Compatible"></label>
+              <label class="account-field provider-field">Base URL<input type="text" x-model="providerManagerDraft.base_url" placeholder="https://api.example.com/v1"></label>
+              <div class="provider-form-row">
+                <label class="account-field provider-field">Timeout<input type="number" min="1" max="600" x-model.number="providerManagerDraft.timeout"></label>
+                <label class="provider-check"><input type="checkbox" x-model="providerManagerDraft.enabled"><span>Enabled</span></label>
+                <label class="account-field provider-field">Health<select class="sel" x-model="providerManagerDraft.health_status"><option value="unknown">unknown</option><option value="ready">ready</option><option value="disabled">disabled</option><option value="auth_failed">auth_failed</option><option value="quota_exhausted">quota_exhausted</option><option value="degraded">degraded</option></select></label>
+              </div>
+              <label class="account-field provider-field">API Token<input type="password" x-ref="providerManagerToken" autocomplete="off" placeholder="Bearer token"></label>
+              <label class="account-field provider-field">Health Note<input type="text" x-model="providerManagerDraft.health_message" placeholder="可选"></label>
+              <div class="provider-json-grid">
+                <label class="account-field provider-field">Aliases JSON<textarea x-model="providerManagerDraft.aliases" rows="4"></textarea></label>
+                <label class="account-field provider-field">Defaults JSON<textarea x-model="providerManagerDraft.defaults" rows="4"></textarea></label>
+              </div>
+              <label class="account-field provider-field">Manual Model Catalog JSON<textarea x-model="providerManagerDraft.model_catalog_text" rows="8"></textarea></label>
+              <div class="provider-form-actions">
+                <button class="btn" @click="newProviderManagerProvider()">清空</button>
+                <button class="btn btn-primary" :disabled="providerManagerSaving" @click="saveProviderManagerProvider()" x-text="providerManagerSaving?'保存中':'保存 Provider'"></button>
+              </div>
+            </div>
+          </section>
+
+          <section class="account-panel provider-models-panel">
+            <div class="account-panel-head provider-panel-head">
+              <div><h2>Model Catalog</h2><p x-text="providerManagerProviderModels().length+' 个当前 Provider 模型'"></p></div>
+            </div>
+            <div class="provider-model-list" x-show="providerManagerProviderModels().length" x-cloak>
+              <template x-for="model in providerManagerProviderModels()" :key="model.id">
+                <article class="provider-model-card">
+                  <div><strong x-text="model.display_name||model.external_model_id"></strong><span x-text="model.external_model_id"></span></div>
+                  <small x-text="providerManagerModelMeta(model)"></small>
+                  <pre x-text="jsonPretty({capabilities:model.capabilities,defaults:model.defaults,aliases:model.aliases})"></pre>
+                </article>
+              </template>
+            </div>
+            <div class="account-empty" x-show="!providerManagerProviderModels().length">暂无模型目录项</div>
+          </section>
+
+          <section class="account-panel provider-audit-panel">
+            <div class="account-panel-head provider-panel-head">
+              <div><h2>Audit</h2><p x-text="providerManagerRecentAudit().length+' 条最近事件'"></p></div>
+            </div>
+            <div class="provider-audit-list" x-show="providerManagerRecentAudit().length" x-cloak>
+              <template x-for="event in providerManagerRecentAudit()" :key="event.id">
+                <article class="provider-audit-card">
+                  <div><strong x-text="event.action"></strong><span x-text="fmtDate(event.created_at)"></span></div>
+                  <p><span x-text="event.target_id"></span><span> · </span><span x-text="event.status"></span></p>
+                  <pre x-text="providerManagerAuditSummary(event)"></pre>
+                </article>
+              </template>
+            </div>
+            <div class="account-empty" x-show="!providerManagerRecentAudit().length">暂无审计事件</div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Request logs -->
   <div class="page-wrap request-page" :class="{active:view==='requests'}">
     <div class="scroll-area">
@@ -1299,7 +1431,7 @@
 </div>
 
 <div class="toast" :class="{show:toast.show}" x-text="toast.msg"></div>
-<script src="/static/app.js?v=20260531-stream-rendering"></script>
+<script src="/static/app.js?v=20260601-provider-manager"></script>
 <script defer src="/static/alpine.min.js"></script>
 </body>
 </html>

@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from aistudio_api.config import DEFAULT_CAMOUFOX_PORT, DEFAULT_IMAGE_MODEL, DEFAULT_TEXT_MODEL, settings
+from aistudio_api.config import DEFAULT_CAMOUFOX_PORT, DEFAULT_IMAGE_MODEL, DEFAULT_TEXT_MODEL, DEFAULT_WARMUP_TEXT_MODEL, settings
 from aistudio_api.domain.errors import RequestError, classify_error
 from aistudio_api.domain.models import ModelOutput, parse_image_output, parse_text_output
 from aistudio_api.infrastructure.cache.snapshot_cache import SnapshotCache
@@ -35,6 +35,11 @@ _IMAGE_REPLAY_MODEL_ALIASES = {
     "gemini-3.1-flash-image-preview": "gemini-3.1-flash-image",
     "gemini-3-pro-image-preview": "gemini-3-pro-image",
 }
+
+_STARTUP_WARMUP_NAVIGATION_TIMEOUT_MS = 30_000
+_STARTUP_WARMUP_CHAT_READY_TIMEOUT_MS = 30_000
+_STARTUP_WARMUP_BOTGUARD_TIMEOUT_MS = 15_000
+_STARTUP_WARMUP_TEMPLATE_CAPTURE_TIMEOUT_MS = 30_000
 
 
 def image_replay_model_id(model: str) -> str:
@@ -76,12 +81,31 @@ class AIStudioClient:
     def is_pure_http(self) -> bool:
         return self._use_pure_http
 
-    async def warmup(self) -> None:
+    async def warmup(
+        self,
+        *,
+        navigation_timeout_ms: int = _STARTUP_WARMUP_NAVIGATION_TIMEOUT_MS,
+        chat_ready_timeout_ms: int = _STARTUP_WARMUP_CHAT_READY_TIMEOUT_MS,
+        botguard_timeout_ms: int = _STARTUP_WARMUP_BOTGUARD_TIMEOUT_MS,
+        template_capture_timeout_ms: int = _STARTUP_WARMUP_TEMPLATE_CAPTURE_TIMEOUT_MS,
+    ) -> None:
         """预热浏览器，启动 Camoufox 并准备首个文本请求所需的捕获模板。"""
         if self._session is not None:
-            await self._session.ensure_context()
+            await self._session.ensure_context(
+                navigation_timeout_ms=navigation_timeout_ms,
+                chat_ready_timeout_ms=chat_ready_timeout_ms,
+            )
             try:
-                await self._capture_service.warmup(prompt="1", model=DEFAULT_TEXT_MODEL)
+                await self._capture_service.warmup(
+                    prompt="1",
+                    model=DEFAULT_WARMUP_TEXT_MODEL,
+                    retry_template_capture=False,
+                    navigation_timeout_ms=navigation_timeout_ms,
+                    chat_ready_timeout_ms=chat_ready_timeout_ms,
+                    botguard_timeout_ms=botguard_timeout_ms,
+                    template_capture_timeout_ms=template_capture_timeout_ms,
+                    template_recovery_attempts=1,
+                )
                 logger.info("浏览器预热完成，文本请求模板已就绪")
             except Exception as exc:
                 logger.warning("浏览器文本请求模板预热失败，仅完成页面预热: %s", exc)
