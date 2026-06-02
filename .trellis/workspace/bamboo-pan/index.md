@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 1
-- **Last Active**: 2026-05-31
+- **Total Sessions**: 2
+- **Last Active**: 2026-06-02
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~41 | Active |
+| `journal-1.md` | ~114 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 2 | 2026-06-02 | Provider Manager dialog and Camoufox compatibility | `13122f6`, `5321ad0` | `feature/provider-manager-config-dialog-camoufox-fix` |
 | 1 | 2026-05-31 | Rename repository to Nexus Studio | `41db9b1`, `901a739` | `chore/archive-rename-nexus-studio` |
 <!-- @@@/auto:session-history -->
 

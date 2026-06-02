@@ -78,3 +78,37 @@ Added a target architecture section for extracting provider management from Loca
 ### Next Steps
 
 - Use the architecture section to split future implementation into Provider Manager UI/API, provider registry, model catalog, routing policy, and gateway adapter tasks.
+
+
+## Session 2: Provider Manager dialog and Camoufox compatibility
+
+**Date**: 2026-06-02
+**Task**: Provider Manager dialog and Camoufox compatibility
+**Branch**: `feature/provider-manager-config-dialog-camoufox-fix`
+
+### Summary
+
+Implemented provider configuration dialog with model discovery, aliases, capability normalization, and fixed Camoufox startup compatibility for Playwright coreBundle layouts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `13122f6` | (see git log) |
+| `5321ad0` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
