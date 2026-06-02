@@ -32,6 +32,138 @@ Questions to answer:
 
 <!-- Patterns that must always be used -->
 
+### Scenario: Provider Manager Model Discovery and Draft Provider Dialogs
+
+#### 1. Scope / Trigger
+
+- Trigger: Changing Provider Manager provider creation/editing, model discovery, model aliases, model capabilities, or provider credential handling.
+- Scope: `routes_provider_manager.py`, `ProviderManagerStore`, static Provider Manager UI, provider credential storage, model catalog persistence, and audit events.
+
+#### 2. Signatures
+
+- Discovery API: `POST /api/provider-manager/model-catalog/discover`.
+- Discovery request fields:
+	- `provider_id?: str` - existing provider id; omitted for an unsaved draft provider.
+	- `base_url?: str` - upstream OpenAI-compatible/Gemini-compatible base URL.
+	- `timeout?: int` - clamped to `1..600`, default `120`.
+	- `token?: str` - one-time API token from the dialog.
+	- `credential_ref?: str` - optional stored credential reference for existing providers.
+	- `interface_mode?: str` - normalized through `normalize_interface_mode`; defaults to `responses`.
+- Discovery response fields: `object == "list"`, `total`, `data[]`, and `interface_mode`.
+- Catalog entry fields: `id`, `provider_id`, `external_model_id`, `display_name`, `capabilities`, `modalities`, `aliases`, `defaults`, `context_window`, `source`, `metadata`.
+
+#### 3. Contracts
+
+- Unsaved provider dialogs must discover models using the validated preview id `provider_preview`; do not use hyphenated placeholder ids because Provider Manager id validation rejects them.
+- Existing-provider discovery may reuse the stored token only when `provider_id` is present and the dialog did not submit a replacement token.
+- Discovery errors and audit events must be secret-safe. Raw tokens must never be returned to the frontend, written to audit logs, or included in exception text.
+- Model discovery must normalize upstream `/models` payloads into Provider Manager catalog entries and infer capabilities via `get_model_capabilities` when the upstream payload has no explicit `capabilities` map.
+- Aliases are catalog metadata, not provider ids. Normalize aliases as a de-duplicated list of clean strings and keep default text/image selection in `defaults`.
+- The provider creation UI must keep a dialog/draft state that can be reused for future edit flow instead of mutating the persisted provider list while the dialog is open.
+
+#### 4. Validation & Error Matrix
+
+| Condition | Required handling |
+| --- | --- |
+| Draft discovery has no `provider_id` | Use `provider_preview` and require a usable `base_url`; return normalized catalog rows without persisting a provider. |
+| Existing provider discovery omits `base_url` or `token` | Load missing values from the stored provider and credential reference. |
+| Upstream returns 4xx | Return the same 4xx class with `detail.type == "upstream_error"` and a token-redacted message. |
+| Upstream returns 5xx or transport error | Return `502` with `detail.type == "upstream_error"` and a token-redacted message. |
+| Upstream request times out | Return `504` with `detail.type == "upstream_timeout"`. |
+| Invalid provider id, token shape, source, or health status | Return the normal Provider Manager validation error; record a failed audit event where applicable. |
+| UI token visibility toggled | Change only the input type/display state; never print or persist the token outside the save/discover payload. |
+
+#### 5. Good/Base/Bad Cases
+
+- Good: The `新建 provider` button opens a configuration dialog, fetches models from the typed base URL and token, lets the user edit aliases/defaults, and saves one provider payload with a normalized `model_catalog`.
+- Base: Manual model entry still works when upstream discovery is unavailable, and capabilities are inferred from known model ids.
+- Bad: Calling discovery with `provider-id-preview`, leaking a bearer token in a 502 message, or forcing users to save a provider before they can test model discovery.
+
+#### 6. Tests Required
+
+- Unit: discovery from an unsaved draft provider returns catalog entries using `provider_preview`.
+- Unit: discovery for an existing provider can reuse the stored token and does not expose the token in response or audit data.
+- Unit/static: provider dialog markup, token hide/show controls, discovery action, alias/default controls, and save payload fields are present.
+- Real WSL API smoke: create a copied workspace, exercise discovery/create/catalog/audit routes, and record provider/model counts.
+- Real WSL UI smoke: open Provider Manager, use the new-provider dialog, toggle token visibility, fetch models, edit alias/defaults, and save.
+
+#### 7. Wrong vs Correct
+
+Wrong:
+
+```python
+provider_id = req.provider_id or "provider-preview"
+raise HTTPException(status_code=502, detail=str(exc))
+```
+
+Correct:
+
+```python
+provider_id = req.provider_id or "provider_preview"
+message = _safe_error_message(str(exc), token)
+raise HTTPException(status_code=502, detail=_error_detail(message, "upstream_error"))
+```
+
+### Scenario: Camoufox Playwright Driver Layout Compatibility
+
+#### 1. Scope / Trigger
+
+- Trigger: Changing account login browser startup, Camoufox launcher behavior, Playwright package versions, Node launcher scripts, proxy identity options, or WSL browser smoke coverage.
+- Scope: `camoufox_launcher.py`, Camoufox launch options, Playwright package root discovery, generated compatibility launch scripts, and account login browser startup tests.
+
+#### 2. Signatures
+
+- Python entrypoint: `python src/aistudio_api/infrastructure/browser/camoufox_launcher.py --port <port> [--headless]`.
+- Runtime function: `launch_camoufox_server(*, port: int, headless: bool)`.
+- Package root helper: `_playwright_package_root(nodejs) -> Path(nodejs).parent / "package"`.
+- Launch script selection: use bundled `LAUNCH_SCRIPT` when `lib/browserServerImpl.js` exists; use the Nexus compatibility script when only `lib/coreBundle.js` exists.
+
+#### 3. Contracts
+
+- The launcher must prune `None` values before passing options to Camoufox/Playwright so optional proxy fields do not become JavaScript `null` values.
+- Playwright layouts differ by version. Do not assume `lib/browserServerImpl.js` exists; Playwright 1.60 can expose `lib/coreBundle.js` instead.
+- The compatibility script must run with `cwd` set to the Playwright package root and must recreate `BrowserServerLauncherImpl` through `coreBundle.js` only when the legacy launcher module is absent.
+- Environment options passed to Playwright must be normalized to Playwright's expected array shape when the compatibility path is used.
+- A successful real startup smoke is a printed `Websocket endpoint` and no `Cannot find module ... browserServerImpl.js` failure.
+
+#### 4. Validation & Error Matrix
+
+| Condition | Required handling |
+| --- | --- |
+| `lib/browserServerImpl.js` exists | Use Camoufox's bundled `LAUNCH_SCRIPT`. |
+| `lib/browserServerImpl.js` is missing and `lib/coreBundle.js` exists | Generate/use the Nexus compatibility launch script. |
+| Both launcher modules are missing | Let Node startup fail visibly; do not mask it as a successful login. |
+| Optional proxy or identity option is `None` | Prune it before serializing the launch config. |
+| Launch process exits before printing a websocket endpoint | Raise `RuntimeError("Server process terminated unexpectedly")` and preserve command output for diagnosis. |
+
+#### 5. Good/Base/Bad Cases
+
+- Good: WSL account login starts Camoufox against a Playwright 1.60 package that has `coreBundle.js` but no `browserServerImpl.js`.
+- Base: Older Playwright packages continue using Camoufox's bundled launch script without the compatibility shim.
+- Bad: Editing `camoufox/launchServer.js` in site-packages, hardcoding a local absolute path, or installing a different Playwright version as the only fix.
+
+#### 6. Tests Required
+
+- Unit: `_resolve_launch_script` selects the bundled script for the legacy layout.
+- Unit: `_resolve_launch_script` selects and writes the compatibility script for the `coreBundle.js` layout.
+- Unit: generated compatibility script contains `coreBundle.js` fallback and `env` normalization.
+- Real WSL: launch `camoufox_launcher.py` on a free localhost port and assert a `Websocket endpoint` line appears.
+
+#### 7. Wrong vs Correct
+
+Wrong:
+
+```python
+process = subprocess.Popen([nodejs, LAUNCH_SCRIPT], cwd=Path(nodejs).parent / "package")
+```
+
+Correct:
+
+```python
+launch_script = _resolve_launch_script(nodejs)
+process = subprocess.Popen([nodejs, str(launch_script)], cwd=_playwright_package_root(nodejs))
+```
+
 ### Scenario: Public Distribution Rename With Compatibility Aliases
 
 #### 1. Scope / Trigger

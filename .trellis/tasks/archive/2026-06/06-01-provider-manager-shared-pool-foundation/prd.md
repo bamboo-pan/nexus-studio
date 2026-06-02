@@ -21,6 +21,9 @@ Implement the first code slice of the new Provider Manager / shared provider-mod
 - Store secrets separately from public provider records; API/UI/model catalog/audit responses must never return raw token values.
 - Add audit-safe events for provider create/update/enable-disable/delete and model catalog changes.
 - Add a frontend Provider Manager navigation entry and page that can list providers, create/edit/enable/disable/delete custom providers, inspect model catalog/health/audit evidence, and make Phase 1 visibly independent from Local Studio chat.
+- Change Provider Manager creation/editing to a configuration dialog opened by “新建 provider” / edit actions, with a write-only token input, token show/hide control, provider model discovery, model alias editing, and automatic model capability/catalog configuration.
+- Add narrow Provider Manager model-discovery API support when needed, keeping raw tokens out of API responses, request logs, frontend state, audit events, and task artifacts.
+- Fix account-management Google login startup when Camoufox's launchServer script expects Playwright's legacy `lib/browserServerImpl.js` but the installed Playwright driver uses the bundled package layout.
 - Add unit/static contract tests covering API behavior, secret redaction, model catalog shape, audit events, and frontend entry points.
 - Update `SYSTEM_TEST_PLAN.md` only if implementation changes the Phase 1 evidence wording or adds required oracles.
 
@@ -32,7 +35,9 @@ Implement the first code slice of the new Provider Manager / shared provider-mod
 - [ ] Model catalog entries include provider id, external model id, display name, capability metadata, modality metadata, aliases/defaults, and manual/discovered source.
 - [ ] Health state distinguishes at least `ready`, `disabled`, and `unknown`, with room for `auth_failed`, `quota_exhausted`, and `degraded`.
 - [ ] Provider Manager frontend route/page is reachable from navigation and does not require opening Local Studio.
+- [ ] Clicking “新建 provider” opens a provider configuration dialog; the dialog can show/hide the token field, fetch models through the Provider Manager backend, edit aliases/default model metadata, and save normalized catalog capabilities.
 - [ ] Existing Local Studio, Playground, Images, Request Logs, Accounts, and Config navigation remain available.
+- [ ] Account-management Google login can start Camoufox under the installed WSL Playwright package layout without failing on missing `playwright/driver/package/lib/browserServerImpl.js`.
 - [ ] Unit/static tests pass and full unit suite passes.
 - [ ] WSL real system test covers Provider Manager API and UI Phase 1 gates plus existing Local Studio/compatible API smoke. If global Google warmup still fails, record it as a blocking environment/runtime issue and do not claim full system pass.
 
