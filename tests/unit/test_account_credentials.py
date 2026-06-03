@@ -78,6 +78,17 @@ def test_import_credentials_infers_email_from_storage_state(tmp_path):
     assert imported[0].name == "user@example.com"
 
 
+def test_import_credentials_preserves_playwright_indexed_db_storage_state(tmp_path):
+    store = AccountStore(accounts_dir=tmp_path)
+    state = storage_state(email="user@example.com")
+    state["origins"][0]["indexedDB"] = [{"name": "oauth", "version": 1, "stores": []}]
+
+    imported = store.import_credentials(state)
+
+    exported = store.export_credentials(imported[0].id)
+    assert exported["accounts"][0]["auth"]["origins"][0]["indexedDB"] == state["origins"][0]["indexedDB"]
+
+
 def test_import_credentials_restores_backup_metadata_when_possible(tmp_path):
     source = AccountStore(accounts_dir=tmp_path / "source")
     account = source.save_account("main", "main@example.com", storage_state())

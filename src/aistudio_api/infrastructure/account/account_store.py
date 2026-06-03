@@ -470,7 +470,7 @@ class AccountStore:
                 account = registry.accounts[account_id]
                 self._write_meta(account)
                 self._save_registry(registry)
-            account = self.set_account_health(account_id, "healthy", "storage state is readable and Google cookies are not expired") or account
+            account = self.set_account_health(account_id, "healthy", "local storage state is readable and Google cookies are not expired; GenerateContent permission is verified during browser warmup") or account
             return self._health_result(account, ok=True)
         except ValueError as exc:
             status = "expired" if "expired" in str(exc).lower() else "error"
@@ -577,6 +577,12 @@ class AccountStore:
             raise ValueError("credential storage state must contain a non-empty cookies array")
         if not isinstance(origins, list):
             raise ValueError("credential storage state origins must be an array when present")
+        for origin in origins:
+            if not isinstance(origin, dict):
+                raise ValueError("credential storage state origins must be objects")
+            indexed_db = origin.get("indexedDB")
+            if indexed_db is not None and not isinstance(indexed_db, list):
+                raise ValueError("credential storage state indexedDB entries must be arrays when present")
         required_cookie_fields = {"name", "value", "domain", "path"}
         has_google_cookie = False
         has_valid_google_cookie = False

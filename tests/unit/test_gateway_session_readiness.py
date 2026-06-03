@@ -5,7 +5,7 @@ import pytest
 from aistudio_api.config import settings
 from aistudio_api.infrastructure.account import tier_detector
 from aistudio_api.infrastructure.account.tier_detector import AccountTier, TierResult
-from aistudio_api.infrastructure.gateway.session import AI_STUDIO_URL, AI_STUDIO_URL_FALLBACK, BrowserSession
+from aistudio_api.infrastructure.gateway.session import AI_STUDIO_URL, AI_STUDIO_URL_FALLBACK, BrowserSession, _aistudio_chat_urls
 
 
 class FakeRequest:
@@ -89,6 +89,7 @@ class FakePage:
         generate_content_url: str = "https://aistudio.google.com/_/BardChatUi/data/batchexecute/GenerateContent",
         botguard_on_send: bool = False,
         button_aria_disabled: bool = False,
+        js_send_result: dict[str, object] | None = None,
     ):
         self.url = url
         self.has_default_makersuite = has_default_makersuite
@@ -104,6 +105,7 @@ class FakePage:
         self.keyboard_triggers_send = keyboard_triggers_send
         self.botguard_on_send = botguard_on_send
         self.button_aria_disabled = button_aria_disabled
+        self.js_send_result = js_send_result
         self.goto_urls: list[str] = []
         self.goto_kwargs: list[dict[str, object]] = []
         self.wait_calls: list[int] = []
@@ -111,6 +113,7 @@ class FakePage:
         self.textarea_clicks = 0
         self.textarea_focuses = 0
         self.clicks = 0
+        self.js_send_clicks = 0
         self.keyboard_presses: list[str] = []
         self.has_bg_service = False
         self.route_handlers: list[tuple[str, object]] = []
@@ -140,6 +143,15 @@ class FakePage:
     def evaluate(self, script: str, *args):
         if script == "mw:!!window.__bg_service":
             return self.has_bg_service
+        if "matchesSendIntent" in script:
+            result = self.js_send_result
+            if result is not None:
+                if args and args[0] is True and result.get("found"):
+                    self.js_send_clicks += 1
+                    if result.get("clicked"):
+                        self.trigger_generate_content_request()
+                return result
+            return {"found": False, "clicked": False, "label": "", "reason": "fake_no_js_button"}
         if "__bg_hooked" in script and "snapKey" in script:
             return self.install_results.pop(0) if self.install_results else "hooked:snapshotKey"
         if "window.default_MakerSuite" in script:
@@ -267,11 +279,24 @@ class TemplateCaptureSessionForTest(BrowserSessionForTest):
 def test_chat_url_detection_requires_aistudio_chat_route():
     session = BrowserSession(port=0)
 
+    assert session._is_aistudio_chat_url("https://aistudio.google.com/u/0/prompts/new_chat")
+    assert session._is_aistudio_chat_url("https://aistudio.google.com/u/2/prompts/new_chat")
     assert session._is_aistudio_chat_url("https://aistudio.google.com/prompts/new_chat")
     assert session._is_aistudio_chat_url("https://aistudio.google.com/app/prompts/new_chat")
     assert session._is_aistudio_chat_url("https://aistudio.google.com/prompts/abc123")
     assert not session._is_aistudio_chat_url("https://aistudio.google.com/app/apikey")
     assert not session._is_aistudio_chat_url("https://accounts.google.com/signin")
+
+
+def test_chat_url_candidates_are_authuser_scoped_and_configurable(monkeypatch):
+    monkeypatch.setattr(settings, "ai_studio_authuser_candidates", "1, 2, 1, bad")
+
+    assert _aistudio_chat_urls()[:4] == (
+        "https://aistudio.google.com/u/1/prompts/new_chat",
+        "https://aistudio.google.com/u/2/prompts/new_chat",
+        "https://aistudio.google.com/u/0/prompts/new_chat",
+        "https://aistudio.google.com/prompts/new_chat",
+    )
 
 
 def test_ensure_hook_page_navigates_wrong_aistudio_route_before_install():
@@ -473,6 +498,22 @@ def test_click_run_button_uses_alternate_aria_selector():
     assert session._click_run_button_sync(page) is True
 
     assert page.clicks == 1
+    assert len(page.routed_requests) == 1
+
+
+def test_click_run_button_prefers_composer_scoped_js_button_over_global_selector():
+    page = FakePage(
+        url=AI_STUDIO_URL,
+        has_textarea=True,
+        button_selectors={"button:has-text('Generate')"},
+        js_send_result={"found": True, "clicked": True, "label": "send"},
+    )
+    session = BrowserSession(port=0)
+
+    assert session._click_run_button_sync(page) is True
+
+    assert page.js_send_clicks == 1
+    assert page.clicks == 0
     assert len(page.routed_requests) == 1
 
 
@@ -678,14 +719,14 @@ def test_image_model_capture_navigates_to_image_route_when_entry_missing():
 
     assert session._prepare_model_onboarding_sync(page, "gemini-3-pro-image-preview") is True
 
-    assert page.goto_urls == ["https://aistudio.google.com/prompts/new_image?model=gemini-3-pro-image-preview"]
+    assert page.goto_urls == ["https://aistudio.google.com/u/2/prompts/new_image?model=gemini-3-pro-image-preview"]
     assert page.open_picker_calls == 1
     assert page.model_picker_selection_calls == 1
 
 
 def test_image_model_capture_continues_on_image_route_when_picker_cards_are_hidden():
     page = FakeImageOnboardingPage(selection_result={"selected": False, "reason": "model_card_not_found", "opened": "image_edit_auto"})
-    page.url = "https://aistudio.google.com/prompts/new_image?model=gemini-3-pro-image-preview"
+    page.url = "https://aistudio.google.com/u/2/prompts/new_image?model=gemini-3-pro-image-preview"
     session = BrowserSession(port=0)
 
     assert session._prepare_model_onboarding_sync(page, "gemini-3-pro-image-preview") is True

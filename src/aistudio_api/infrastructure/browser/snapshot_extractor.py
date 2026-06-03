@@ -11,6 +11,7 @@ import time
 from typing import Optional
 
 from aistudio_api.config import DEFAULT_CAMOUFOX_PORT, settings
+from aistudio_api.infrastructure.gateway.session import AI_STUDIO_URL
 
 logger = logging.getLogger("aistudio.snapshot")
 TARGET_HOST = "alkalimakersuite-pa.clients6.google.com"
@@ -58,7 +59,7 @@ class SnapshotExtractor:
 
         await page.route(f"**/{TARGET_HOST}/**", on_route)
         await page.goto(
-            "https://aistudio.google.com/app/prompts/new_chat",
+            AI_STUDIO_URL,
             wait_until="networkidle",
             timeout=30000,
         )

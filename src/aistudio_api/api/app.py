@@ -18,6 +18,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from aistudio_api.infrastructure.generated_images import GeneratedImageStore
+from aistudio_api.domain.errors import AuthError
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
 from aistudio_api.infrastructure.request_logs import RequestLogStore, new_request_chain_id, reset_request_chain_id, set_request_chain_id
 
@@ -37,6 +38,10 @@ logger = logging.getLogger("aistudio.server")
 
 _WARMUP_RETRY_ATTEMPTS = 3
 _WARMUP_RETRY_BACKOFF_SECONDS = (2.0, 5.0)
+GENERATE_CONTENT_AUTH_HEALTH_REASON = (
+    "AI Studio GenerateContent returned an authorization failure; re-login or import the "
+    "browser session for the Google account that can generate in AI Studio, including IndexedDB storage state."
+)
 
 
 def _is_validation_error(exc: BaseException) -> bool:
@@ -97,6 +102,11 @@ def _warmup_retry_delay(attempt: int, backoff_seconds: tuple[float, ...]) -> flo
     if not backoff_seconds:
         return 0.0
     return backoff_seconds[min(attempt - 1, len(backoff_seconds) - 1)]
+
+
+def _record_account_warmup_failure(account_store: Any, account_id: str, exc: BaseException) -> None:
+    if isinstance(exc, AuthError):
+        account_store.isolate_account(account_id, GENERATE_CONTENT_AUTH_HEALTH_REASON)
 
 
 async def _warmup_with_retries(
@@ -285,6 +295,7 @@ async def lifespan(app: FastAPI):
                     raise
                 except Exception as e:
                     runtime_state.warmup_failed_accounts = [*runtime_state.warmup_failed_accounts, account_id]
+                    _record_account_warmup_failure(account_store, account_id, e)
                     logger.warning("Account browser warmup failed for account=%s: %s", account_id, e)
             if runtime_state.warmup_failed_accounts:
                 runtime_state.warmup_status = "partial" if runtime_state.warmup_completed_accounts else "failed"

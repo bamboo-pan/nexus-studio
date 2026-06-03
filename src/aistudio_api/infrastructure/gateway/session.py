@@ -20,10 +20,14 @@ from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
 
 log = logging.getLogger("aistudio.session")
 
-AI_STUDIO_URL = "https://aistudio.google.com/prompts/new_chat"
-AI_STUDIO_URL_FALLBACK = "https://aistudio.google.com/app/prompts/new_chat"
-AI_STUDIO_IMAGE_URL = "https://aistudio.google.com/prompts/new_image?model=imagen-4.0-generate-001"
-AI_STUDIO_IMAGE_URL_FALLBACK = "https://aistudio.google.com/app/prompts/new_image?model=imagen-4.0-generate-001"
+AI_STUDIO_URL = "https://aistudio.google.com/u/2/prompts/new_chat"
+AI_STUDIO_URL_FALLBACK = "https://aistudio.google.com/u/0/prompts/new_chat"
+AI_STUDIO_URL_UNSCOPED_FALLBACK = "https://aistudio.google.com/prompts/new_chat"
+AI_STUDIO_URL_LEGACY_FALLBACK = "https://aistudio.google.com/app/prompts/new_chat"
+AI_STUDIO_IMAGE_URL = "https://aistudio.google.com/u/2/prompts/new_image?model=imagen-4.0-generate-001"
+AI_STUDIO_IMAGE_URL_FALLBACK = "https://aistudio.google.com/u/0/prompts/new_image?model=imagen-4.0-generate-001"
+AI_STUDIO_IMAGE_URL_UNSCOPED_FALLBACK = "https://aistudio.google.com/prompts/new_image?model=imagen-4.0-generate-001"
+AI_STUDIO_IMAGE_URL_LEGACY_FALLBACK = "https://aistudio.google.com/app/prompts/new_image?model=imagen-4.0-generate-001"
 AI_STUDIO_HOME_URL = "https://aistudio.google.com/"
 AI_STUDIO_HOST = "aistudio.google.com"
 AI_DEVELOPERS_HOST = "ai.google.dev"
@@ -51,6 +55,38 @@ AI_STUDIO_SEND_BUTTON_SELECTORS = (
     "button[title*='运行' i]",
     "button[title*='发送' i]",
 )
+
+
+def _configured_authuser_candidates() -> tuple[str, ...]:
+    raw = str(getattr(settings, "ai_studio_authuser_candidates", "") or "")
+    values: list[str] = []
+    for item in raw.split(","):
+        value = item.strip()
+        if not value or not value.isdigit():
+            continue
+        if value not in values:
+            values.append(value)
+    for fallback in ("2", "0"):
+        if fallback not in values:
+            values.append(fallback)
+    return tuple(values)
+
+
+def _aistudio_chat_urls() -> tuple[str, ...]:
+    urls = [f"https://aistudio.google.com/u/{authuser}/prompts/new_chat" for authuser in _configured_authuser_candidates()]
+    urls.extend([AI_STUDIO_URL_UNSCOPED_FALLBACK, AI_STUDIO_URL_LEGACY_FALLBACK, AI_STUDIO_HOME_URL])
+    return tuple(dict.fromkeys(urls))
+
+
+def _aistudio_image_urls(model: str) -> tuple[str, ...]:
+    model_id = str(model or "").strip().removeprefix("models/") or "imagen-4.0-generate-001"
+    encoded = quote(model_id, safe="")
+    urls = [f"https://aistudio.google.com/u/{authuser}/prompts/new_image?model={encoded}" for authuser in _configured_authuser_candidates()]
+    urls.extend([
+        f"https://aistudio.google.com/prompts/new_image?model={encoded}",
+        f"https://aistudio.google.com/app/prompts/new_image?model={encoded}",
+    ])
+    return tuple(dict.fromkeys(urls))
 AI_STUDIO_SEND_BUTTON_JS = r"""(clickButton) => {
     const keywords = ['run', 'send', 'generate', '运行', '发送'];
     const iconKeywords = ['send', 'play_arrow', 'arrow_upward'];
@@ -69,12 +105,46 @@ AI_STUDIO_SEND_BUTTON_JS = r"""(clickButton) => {
         el.querySelector('[data-mat-icon-name]')?.getAttribute('data-mat-icon-name'),
     ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
     const enabled = (el) => !el.disabled && el.getAttribute('aria-disabled') !== 'true';
-    const candidates = Array.from(document.querySelectorAll('button, [role="button"]'))
-        .filter((el) => visible(el) && enabled(el));
-    const target = candidates.find((el) => {
+    const textareas = Array.from(document.querySelectorAll('textarea')).filter(visible);
+    const textarea = document.activeElement && document.activeElement.matches && document.activeElement.matches('textarea')
+        ? document.activeElement
+        : textareas[textareas.length - 1];
+    if (!textarea) return {found: false, clicked: false, label: '', reason: 'no_textarea'};
+
+    const matchesSendIntent = (el) => {
         const label = labelOf(el);
         return keywords.some((keyword) => label.includes(keyword)) || iconKeywords.some((keyword) => label.includes(keyword));
-    });
+    };
+    const buttonCandidates = (root) => Array.from(root.querySelectorAll('button, [role="button"]'))
+        .filter((el) => visible(el) && enabled(el) && matchesSendIntent(el));
+
+    let ancestor = textarea;
+    let target = null;
+    for (let depth = 0; depth < 8 && ancestor; depth += 1) {
+        ancestor = ancestor.parentElement;
+        if (!ancestor) break;
+        const candidates = buttonCandidates(ancestor);
+        if (!candidates.length) continue;
+        const textareaRect = textarea.getBoundingClientRect();
+        const nearby = candidates
+            .map((el) => {
+                const rect = el.getBoundingClientRect();
+                const dx = Math.abs((rect.left + rect.width / 2) - (textareaRect.left + textareaRect.width / 2));
+                const dy = Math.abs((rect.top + rect.height / 2) - (textareaRect.top + textareaRect.height / 2));
+                return {el, score: dy * 3 + dx};
+            })
+            .filter(({el}) => {
+                const rect = el.getBoundingClientRect();
+                const textareaRect = textarea.getBoundingClientRect();
+                return rect.bottom >= textareaRect.top - 160 && rect.top <= textareaRect.bottom + 160;
+            })
+            .sort((a, b) => a.score - b.score);
+        if (nearby.length) {
+            target = nearby[0].el;
+            break;
+        }
+    }
+
     if (!target) return {found: false, clicked: false, label: ''};
     const label = labelOf(target);
     if (clickButton) target.click();
@@ -1443,7 +1513,7 @@ mw:((hash) => {
     ) -> None:
         import time as _t
         last_error = None
-        for url in (AI_STUDIO_URL, AI_STUDIO_URL_FALLBACK, AI_STUDIO_HOME_URL):
+        for url in _aistudio_chat_urls():
             route_started_at = _t.time()
             goto_error = None
             try:
@@ -1466,11 +1536,11 @@ mw:((hash) => {
 
             if self._is_ai_developers_url(current_url):
                 log.debug("AI Studio redirected to docs after %s: %s", url, current_url)
-                if url != AI_STUDIO_URL_FALLBACK:
+                if url != AI_STUDIO_URL_LEGACY_FALLBACK:
                     last_error = RuntimeError(f"AI Studio redirected to docs after navigating to {url}: {current_url}")
                     continue
                 try:
-                    page.goto(AI_STUDIO_URL_FALLBACK, wait_until="commit", timeout=navigation_timeout_ms)
+                    page.goto(AI_STUDIO_URL_LEGACY_FALLBACK, wait_until="commit", timeout=navigation_timeout_ms)
                     page.wait_for_timeout(2500)
                     current_url = getattr(page, "url", "")
                 except Exception as exc:
@@ -1526,7 +1596,11 @@ mw:((hash) => {
             return False
         if parsed.hostname != AI_STUDIO_HOST:
             return False
-        return any((parsed.path or "").startswith(prefix) for prefix in AI_STUDIO_CHAT_PATH_PREFIXES)
+        path = parsed.path or ""
+        if any(path.startswith(prefix) for prefix in AI_STUDIO_CHAT_PATH_PREFIXES):
+            return True
+        parts = [part for part in path.split("/") if part]
+        return len(parts) >= 3 and parts[0] == "u" and parts[1].isdigit() and parts[2] == "prompts"
 
     def _chat_runtime_state_sync(self, page, *, include_details: bool = False) -> dict[str, Any]:
         errors: list[str] = []
@@ -1702,13 +1776,8 @@ mw:((hash) => {
             )
         return prepared
 
-    def _aistudio_image_urls_for_model(self, model: str) -> tuple[str, str]:
-        model_id = str(model or "").strip().removeprefix("models/") or "imagen-4.0-generate-001"
-        encoded = quote(model_id, safe="")
-        return (
-            f"https://aistudio.google.com/prompts/new_image?model={encoded}",
-            f"https://aistudio.google.com/app/prompts/new_image?model={encoded}",
-        )
+    def _aistudio_image_urls_for_model(self, model: str) -> tuple[str, ...]:
+        return _aistudio_image_urls(model)
 
     def _is_aistudio_image_url(self, url: str | None) -> bool:
         try:
@@ -1718,7 +1787,10 @@ mw:((hash) => {
         if parsed.hostname != AI_STUDIO_HOST:
             return False
         path = parsed.path or ""
-        return path.startswith("/prompts/new_image") or path.startswith("/app/prompts/new_image")
+        if path.startswith("/prompts/new_image") or path.startswith("/app/prompts/new_image"):
+            return True
+        parts = [part for part in path.split("/") if part]
+        return len(parts) >= 4 and parts[0] == "u" and parts[1].isdigit() and parts[2] == "prompts" and parts[3] == "new_image"
 
     def _is_aistudio_image_context_sync(self, page, selection: dict[str, Any] | None = None) -> bool:
         if self._is_aistudio_image_url(getattr(page, "url", "")):
@@ -1811,6 +1883,13 @@ mw:((hash) => {
         raise RuntimeError(f"Hook install failed: {result}; {diagnostics}")
 
     def _click_run_button_sync(self, page) -> bool:
+        try:
+            result = page.evaluate(AI_STUDIO_SEND_BUTTON_JS, True)
+            if isinstance(result, dict) and result.get("clicked"):
+                return True
+        except Exception:
+            pass
+
         for selector in AI_STUDIO_SEND_BUTTON_SELECTORS:
             try:
                 button = page.query_selector(selector)
@@ -1828,13 +1907,6 @@ mw:((hash) => {
                 return True
             except Exception:
                 continue
-
-        try:
-            result = page.evaluate(AI_STUDIO_SEND_BUTTON_JS, True)
-            if isinstance(result, dict) and result.get("clicked"):
-                return True
-        except Exception:
-            pass
 
         try:
             textarea = page.query_selector("textarea")
@@ -1880,6 +1952,13 @@ mw:((hash) => {
             pass
 
     def _has_run_button_sync(self, page) -> bool:
+        try:
+            result = page.evaluate(AI_STUDIO_SEND_BUTTON_JS, False)
+            if isinstance(result, dict) and result.get("found"):
+                return True
+        except Exception:
+            pass
+
         for selector in AI_STUDIO_SEND_BUTTON_SELECTORS:
             try:
                 button = page.query_selector(selector)
@@ -1892,11 +1971,7 @@ mw:((hash) => {
                     return True
             except Exception:
                 continue
-        try:
-            result = page.evaluate(AI_STUDIO_SEND_BUTTON_JS, False)
-            return isinstance(result, dict) and bool(result.get("found"))
-        except Exception:
-            return False
+        return False
 
     def _wait_until_idle_sync(self, page) -> None:
         for _ in range(60):

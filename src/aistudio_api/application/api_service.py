@@ -2682,6 +2682,10 @@ async def handle_chat(req: ChatRequest, client: AIStudioClient, request: Request
                     continue
                 _record_request_result(model, "errors", account_id=failed_account_id)
                 raise _upstream_exception(exc) from exc
+            except HTTPException as exc:
+                if isinstance(last_error, AuthError) and exc.status_code == 503:
+                    raise _upstream_exception(last_error) from exc
+                raise
             except RequestError as exc:
                 _record_request_result(model, "errors", account_id=account_context.account_id if account_context is not None else None)
                 raise _upstream_exception(exc) from exc
@@ -2802,6 +2806,8 @@ async def handle_image_generation(req: ImageRequest, client: AIStudioClient):
                         raise HTTPException(429, detail={"message": str(exc), "type": "rate_limit_exceeded"}) from exc
                 except AuthError as exc:
                     _cleanup_persisted_image_items(image_store, items)
+                    failed_account_id = account_context.account_id if account_context is not None else None
+                    exclude_account_id = failed_account_id
                     if attempt == 0:
                         logger.warning("Image auth error; clearing capture state and retrying once: %s", exc)
                         _clear_client_capture_state(account_context.client if account_context is not None else client)
@@ -2809,6 +2815,10 @@ async def handle_image_generation(req: ImageRequest, client: AIStudioClient):
                         continue
                     _record_request_result(image_plan.model, "errors", account_id=account_context.account_id if account_context is not None else None)
                     raise _upstream_exception(exc) from exc
+                except HTTPException as exc:
+                    if isinstance(last_error, AuthError) and exc.status_code == 503:
+                        raise _upstream_exception(last_error) from exc
+                    raise
                 except RequestError as exc:
                     _cleanup_persisted_image_items(image_store, items)
                     if attempt == 0 and _is_empty_image_response(exc):
@@ -3082,6 +3092,8 @@ async def handle_gemini_generate_content(
                     raise HTTPException(429, detail={"message": str(exc), "type": "rate_limit_exceeded"}) from exc
             except AuthError as exc:
                 error_model = normalized["model"] if normalized else model_path
+                failed_account_id = account_context.account_id if account_context is not None else None
+                exclude_account_id = failed_account_id
                 if attempt == 0:
                     logger.warning("Gemini auth error; clearing capture state and retrying once: %s", exc)
                     _clear_client_capture_state(account_context.client if account_context is not None else client)
@@ -3089,6 +3101,10 @@ async def handle_gemini_generate_content(
                     continue
                 _record_request_result(error_model, "errors", account_id=account_context.account_id if account_context is not None else None)
                 raise _upstream_exception(exc) from exc
+            except HTTPException as exc:
+                if isinstance(last_error, AuthError) and exc.status_code == 503:
+                    raise _upstream_exception(last_error) from exc
+                raise
             except RequestError as exc:
                 _record_request_result(normalized["model"] if normalized else model_path, "errors", account_id=account_context.account_id if account_context is not None else None)
                 raise _upstream_exception(exc) from exc

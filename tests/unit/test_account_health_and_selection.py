@@ -5,25 +5,27 @@ from datetime import datetime, timezone
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from aistudio_api.api.app import (
+    GENERATE_CONTENT_AUTH_HEALTH_REASON,
     _account_pool_warmup_account_ids,
     _is_transient_warmup_error,
+    _record_account_warmup_failure,
     _should_start_account_pool_warmup,
     _should_start_background_warmup,
     _warmup_with_retries,
 )
 from aistudio_api.api.dependencies import get_account_service
 from aistudio_api.api.routes_accounts import router as accounts_router
-from aistudio_api.api.schemas import ChatRequest, ImageRequest, Message
+from aistudio_api.api.schemas import ChatRequest, GeminiContent, GeminiGenerateContentRequest, GeminiPart, ImageRequest, Message
 from aistudio_api.api.state import runtime_state
 from aistudio_api.application.account_client_pool import AccountClientPool
 from aistudio_api.config import settings
 from aistudio_api.application.account_rotator import AccountRotator, RotationMode
 from aistudio_api.application.account_service import AccountService
-from aistudio_api.application.api_service import handle_chat, handle_image_generation, health_response
-from aistudio_api.domain.errors import UsageLimitExceeded
+from aistudio_api.application.api_service import handle_chat, handle_gemini_generate_content, handle_image_generation, health_response
+from aistudio_api.domain.errors import AuthError, UsageLimitExceeded
 from aistudio_api.domain.models import Candidate, GeneratedImage, ModelOutput
 from aistudio_api.infrastructure.account.account_store import AccountStore
 from aistudio_api.infrastructure.account.login_service import LoginService
@@ -182,6 +184,19 @@ def test_warmup_with_retries_keeps_auth_failure_hard():
         asyncio.run(_warmup_with_retries(warmup, label="test", attempts=3, backoff_seconds=(0.1, 0.2), sleep=sleep))
 
     assert calls == 1
+
+
+def test_account_warmup_auth_failure_isolates_account_with_actionable_reason(tmp_path):
+    store = AccountStore(accounts_dir=tmp_path)
+    account = store.save_account("main", None, storage_state(cookie_name="sid1"))
+
+    _record_account_warmup_failure(store, account.id, AuthError("GenerateContent permission check failed"))
+
+    refreshed = store.get_account(account.id)
+    assert refreshed.health_status == "isolated"
+    assert refreshed.is_isolated is True
+    assert refreshed.health_reason == GENERATE_CONTENT_AUTH_HEALTH_REASON
+    assert "sid1" not in refreshed.health_reason
 
 
 def test_warmup_with_retries_raises_after_transient_attempts_exhausted():
@@ -588,6 +603,7 @@ class FakeChatClient:
 class FakePooledChatClient:
     clients = []
     fail_for_accounts: set[str] = set()
+    auth_fail_for_accounts: set[str] = set()
 
     def __init__(self, **kwargs):
         self.auth_path = ""
@@ -607,11 +623,24 @@ class FakePooledChatClient:
 
     async def generate_content(self, **kwargs):
         self.calls.append(kwargs)
+        if self.account_id in FakePooledChatClient.auth_fail_for_accounts:
+            FakePooledChatClient.auth_fail_for_accounts.remove(self.account_id)
+            raise AuthError("GenerateContent permission check failed")
         if self.account_id in FakePooledChatClient.fail_for_accounts:
             FakePooledChatClient.fail_for_accounts.remove(self.account_id)
             raise UsageLimitExceeded("quota exhausted")
         return ModelOutput(
             candidates=[Candidate(text=f"ok:{self.account_id}")],
+            usage={"total_tokens": 1},
+        )
+
+    async def generate_image(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.account_id in FakePooledChatClient.auth_fail_for_accounts:
+            FakePooledChatClient.auth_fail_for_accounts.remove(self.account_id)
+            raise AuthError("GenerateContent permission check failed")
+        return ModelOutput(
+            candidates=[Candidate(text=f"ok:{self.account_id}", images=[GeneratedImage(mime="image/png", data=b"image", size=5)])],
             usage={"total_tokens": 1},
         )
 
@@ -791,6 +820,97 @@ def test_chat_pool_retry_excludes_rate_limited_account(tmp_path):
     assert stats[second.id]["requests"] == 1
     assert stats[first.id]["in_flight"] == 0
     assert stats[second.id]["in_flight"] == 0
+
+
+def test_chat_pool_preserves_auth_error_when_retry_has_no_account(tmp_path):
+    FakePooledChatClient.clients = []
+    FakePooledChatClient.fail_for_accounts = set()
+    store = AccountStore(accounts_dir=tmp_path)
+    account = store.save_account("first", None, storage_state(cookie_name="sid1"))
+    FakePooledChatClient.auth_fail_for_accounts = {account.id}
+    account_service = AccountService(store, LoginService())
+    rotator = AccountRotator(store)
+    pool = AccountClientPool(store, client_factory=FakePooledChatClient)
+
+    async def call_chat_once():
+        return await handle_chat(
+            ChatRequest(model="gemini-3-flash-preview", messages=[Message(role="user", content="hello")]),
+            runtime_state.client,
+        )
+
+    with pytest.raises(HTTPException) as exc_info:
+        run_with_account_pool(
+            call_chat_once(),
+            account_service=account_service,
+            rotator=rotator,
+            account_client_pool=pool,
+        )
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail["type"] == "authentication_error"
+    assert "GenerateContent permission check failed" in exc_info.value.detail["message"]
+
+
+def test_image_pool_preserves_auth_error_when_retry_has_no_account(tmp_path):
+    FakePooledChatClient.clients = []
+    FakePooledChatClient.fail_for_accounts = set()
+    store = AccountStore(accounts_dir=tmp_path)
+    account = store.save_account("first", None, storage_state(cookie_name="sid1"), tier="pro")
+    FakePooledChatClient.auth_fail_for_accounts = {account.id}
+    account_service = AccountService(store, LoginService())
+    rotator = AccountRotator(store)
+    pool = AccountClientPool(store, client_factory=FakePooledChatClient)
+
+    async def call_image_once():
+        return await handle_image_generation(
+            ImageRequest(prompt="draw", model="gemini-3.1-flash-image-preview"),
+            runtime_state.client,
+        )
+
+    with pytest.raises(HTTPException) as exc_info:
+        run_with_account_pool(
+            call_image_once(),
+            account_service=account_service,
+            rotator=rotator,
+            account_client_pool=pool,
+        )
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail["type"] == "authentication_error"
+    assert "GenerateContent permission check failed" in exc_info.value.detail["message"]
+
+
+def test_gemini_pool_preserves_auth_error_when_retry_has_no_account(tmp_path):
+    FakePooledChatClient.clients = []
+    FakePooledChatClient.fail_for_accounts = set()
+    store = AccountStore(accounts_dir=tmp_path)
+    account = store.save_account("first", None, storage_state(cookie_name="sid1"))
+    FakePooledChatClient.auth_fail_for_accounts = {account.id}
+    account_service = AccountService(store, LoginService())
+    rotator = AccountRotator(store)
+    pool = AccountClientPool(store, client_factory=FakePooledChatClient)
+
+    async def call_gemini_once():
+        return await handle_gemini_generate_content(
+            "gemini-3-flash-preview",
+            GeminiGenerateContentRequest(
+                contents=[GeminiContent(role="user", parts=[GeminiPart(text="hello")])],
+            ),
+            runtime_state.client,
+            stream=False,
+        )
+
+    with pytest.raises(HTTPException) as exc_info:
+        run_with_account_pool(
+            call_gemini_once(),
+            account_service=account_service,
+            rotator=rotator,
+            account_client_pool=pool,
+        )
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail["type"] == "authentication_error"
+    assert "GenerateContent permission check failed" in exc_info.value.detail["message"]
 
 
 def test_image_generation_switches_from_free_active_account_to_available_premium(tmp_path):

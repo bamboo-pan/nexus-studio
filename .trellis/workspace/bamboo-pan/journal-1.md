@@ -112,3 +112,43 @@ Implemented provider configuration dialog with model discovery, aliases, capabil
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: Fix WSL Camoufox AI Studio internal error
+
+**Date**: 2026-06-03
+**Task**: Fix WSL Camoufox AI Studio internal error
+**Branch**: `feature/fix-wsl-camoufox-aistudio-internal-error`
+
+### Summary
+
+Fixed AI Studio browser auth-state preservation, warmup authorization probing, and auth error propagation for WSL browser-backed requests.
+
+### Main Changes
+
+- Added IndexedDB-preserving account login/import/export handling.
+- Added GenerateContent replay probe to browser warmup so /health does not report complete on capture-only readiness.
+- Preserved AuthError root cause across chat/image/Gemini retry account exhaustion.
+- Added scoped AI Studio /u/<authuser> route candidates and composer-scoped send-button detection.
+- Updated backend specs for warmup/auth-state and API auth error propagation.
+- Verification: Windows unit suite 400 passed; WSL focused tests 107 passed; real WSL API smoke returned 401 authentication_error for stale auth instead of false-ready/500; real WSL Local Studio UI smoke verified busy=false and can_send=true after diagnosed 401 recovery.
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7bf244f` | (see git log) |
+| `9212ebc` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

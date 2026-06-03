@@ -57,6 +57,7 @@ class Settings:
     camoufox_geolocation_latitude: float = float(os.getenv("AISTUDIO_CAMOUFOX_GEOLOCATION_LATITUDE", "37.7749"))
     camoufox_geolocation_longitude: float = float(os.getenv("AISTUDIO_CAMOUFOX_GEOLOCATION_LONGITUDE", "-122.4194"))
     camoufox_geolocation_accuracy: int = int(os.getenv("AISTUDIO_CAMOUFOX_GEOLOCATION_ACCURACY", "100"))
+    ai_studio_authuser_candidates: str = os.getenv("AISTUDIO_AUTHUSER_CANDIDATES", os.getenv("AISTUDIO_AUTHUSER", "2,0"))
     timeout_replay: int = int(os.getenv("AISTUDIO_TIMEOUT_REPLAY", "120"))
     timeout_stream: int = int(os.getenv("AISTUDIO_TIMEOUT_STREAM", "120"))
     timeout_capture: int = int(os.getenv("AISTUDIO_TIMEOUT_CAPTURE", "30"))

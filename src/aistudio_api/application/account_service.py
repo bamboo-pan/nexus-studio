@@ -130,7 +130,7 @@ class AccountService:
             account = self._store.set_account_health(
                 account_id,
                 "healthy",
-                f"storage state is readable; tier detection unavailable: {exc}",
+                f"local storage state is readable; tier detection unavailable: {exc}",
             )
             if account is None:
                 return result
@@ -152,9 +152,9 @@ class AccountService:
         tier_to_store = detected_tier
         if detected_tier == "free" and account.is_premium:
             tier_to_store = account.tier
-            health_reason = f"storage state is readable; tier detection returned free, keeping stored {account.tier} tier"
+            health_reason = f"local storage state is readable; tier detection returned free, keeping stored {account.tier} tier"
         else:
-            health_reason = f"storage state is readable; detected {detected_tier} tier"
+            health_reason = f"local storage state is readable; detected {detected_tier} tier"
 
         account = self._store.update_account(account_id, tier=tier_to_store)
         if account is None:

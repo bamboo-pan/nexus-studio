@@ -40,6 +40,14 @@ _STARTUP_WARMUP_NAVIGATION_TIMEOUT_MS = 30_000
 _STARTUP_WARMUP_CHAT_READY_TIMEOUT_MS = 30_000
 _STARTUP_WARMUP_BOTGUARD_TIMEOUT_MS = 15_000
 _STARTUP_WARMUP_TEMPLATE_CAPTURE_TIMEOUT_MS = 30_000
+_WARMUP_PROBE_TIMEOUT_SECONDS = 30
+
+AI_STUDIO_GENERATE_CONTENT_AUTH_GUIDANCE = (
+    "AI Studio GenerateContent permission check failed. The browser can open AI Studio, "
+    "but the stored auth state cannot generate content. Re-login or import the browser "
+    "session for the Google account that can generate in AI Studio; Playwright storage "
+    "state must include IndexedDB credentials."
+)
 
 
 def image_replay_model_id(model: str) -> str:
@@ -96,7 +104,7 @@ class AIStudioClient:
                 chat_ready_timeout_ms=chat_ready_timeout_ms,
             )
             try:
-                await self._capture_service.warmup(
+                captured = await self._capture_service.warmup(
                     prompt="1",
                     model=DEFAULT_WARMUP_TEXT_MODEL,
                     retry_template_capture=False,
@@ -106,10 +114,27 @@ class AIStudioClient:
                     template_capture_timeout_ms=template_capture_timeout_ms,
                     template_recovery_attempts=1,
                 )
+                await self._probe_generate_content_permission(captured, model=DEFAULT_WARMUP_TEXT_MODEL)
                 logger.info("浏览器预热完成，文本请求模板已就绪")
             except Exception as exc:
                 logger.warning("浏览器文本请求模板预热失败，仅完成页面预热: %s", exc)
                 raise
+
+    async def _probe_generate_content_permission(self, captured: CapturedRequest, *, model: str) -> None:
+        status, raw = await self._replay_request(
+            captured,
+            body=captured.body,
+            kind="warmup_probe",
+            model=model,
+            timeout=_WARMUP_PROBE_TIMEOUT_SECONDS,
+        )
+        if status == 200:
+            return
+        raw_text = raw.decode("utf-8", errors="replace")
+        classified = classify_error(status, raw_text)
+        if status in (401, 403):
+            raise type(classified)(f"{AI_STUDIO_GENERATE_CONTENT_AUTH_GUIDANCE} Upstream returned HTTP {status}: {raw_text[:200]}") from classified
+        raise classified
 
     async def close(self) -> None:
         if self._session is not None:
