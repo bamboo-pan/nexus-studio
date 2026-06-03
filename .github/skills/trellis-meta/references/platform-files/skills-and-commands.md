@@ -9,7 +9,7 @@ Skills and commands are textual entry points for user interaction with Trellis. 
 | skill | AI auto-match or explicit user mention | Long-term capabilities, workflow rules, modification guides. |
 | command | Explicit user invocation | Clear operation entry points such as continue and finish-work. |
 | prompt | Explicit user invocation or platform selection | Similar to command, but in a platform prompt format. |
-| workflow | Explicit user selection or platform auto-match | Guides the main session when no sub-agent/hook exists. |
+| workflow | Explicit user selection or platform auto-match | Guides the main session through the Trellis flow. |
 
 Trellis workflow skills usually share one semantic set: brainstorm, before-dev, check, update-spec, break-loop. Multi-file built-in skills such as `trellis-meta` use layered references.
 

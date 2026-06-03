@@ -72,7 +72,7 @@ Before a task enters implementation, Phase 1.3 should write relevant specs into 
 {"file": ".trellis/spec/cli/unit-test/conventions.md", "reason": "Test expectations"}
 ```
 
-Sub-agents or platform preludes read these JSONL files and load the referenced specs. On platforms without sub-agent support, the AI should read the relevant specs directly according to the workflow.
+The main session reads these JSONL files and loads the referenced specs before implementation/checking. This keeps context explicit and prevents repeating spec discovery after a resume.
 
 ## What Specs Should Contain
 

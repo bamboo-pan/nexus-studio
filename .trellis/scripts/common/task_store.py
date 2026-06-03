@@ -108,27 +108,8 @@ def _repo_relative_path(path: Path, repo_root: Path) -> str:
 
 
 # =============================================================================
-# Sub-agent platform detection + JSONL seeding
+# JSONL context seeding
 # =============================================================================
-
-# Config directories of platforms that consume implement.jsonl / check.jsonl.
-# Keep in sync with src/types/ai-tools.ts AI_TOOLS entries — these are the
-# platforms listed in workflow.md's "agent-capable" Skill Routing block
-# (Class-1 hook-inject + Class-2 pull-based preludes). Kilo / Antigravity /
-# Windsurf are NOT in this list: they do not consume JSONL.
-_SUBAGENT_CONFIG_DIRS: tuple[str, ...] = (
-    ".claude",
-    ".cursor",
-    ".codex",
-    ".kiro",
-    ".gemini",
-    ".opencode",
-    ".qoder",
-    ".codebuddy",
-    ".factory",   # Factory Droid
-    ".github/copilot",
-    ".pi",        # Pi Agent
-)
 
 _SEED_EXAMPLE = (
     "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. "
@@ -136,19 +117,6 @@ _SEED_EXAMPLE = (
     "Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. "
     "Delete this line once real entries are added."
 )
-
-
-def _has_subagent_platform(repo_root: Path) -> bool:
-    """Return True if any sub-agent-capable platform is configured.
-
-    Detected by probing well-known config directories at the repo root. Used
-    only to decide whether ``task.py create`` should seed empty
-    ``implement.jsonl`` / ``check.jsonl`` files.
-    """
-    for config_dir in _SUBAGENT_CONFIG_DIRS:
-        if (repo_root / config_dir).is_dir():
-            return True
-    return False
 
 
 def _write_seed_jsonl(path: Path) -> None:
@@ -264,17 +232,15 @@ def cmd_create(args: argparse.Namespace) -> int:
 
     write_json(task_json_path, task_data)
 
-    # Seed implement.jsonl / check.jsonl for sub-agent-capable platforms.
-    # Agent curates real entries in Phase 1.3 (see .trellis/workflow.md).
-    # Agent-less platforms (Kilo / Antigravity / Windsurf) skip this — they
-    # load specs via the trellis-before-dev skill instead of JSONL.
+    # Seed implement.jsonl / check.jsonl for every task. The main session
+    # curates real entries in Phase 1.3 (see .trellis/workflow.md), then uses
+    # them to avoid re-discovering the same spec/research context on resume.
     seeded_jsonl = False
-    if _has_subagent_platform(repo_root):
-        for jsonl_name in ("implement.jsonl", "check.jsonl"):
-            jsonl_path = task_dir / jsonl_name
-            if not jsonl_path.exists():
-                _write_seed_jsonl(jsonl_path)
-        seeded_jsonl = True
+    for jsonl_name in ("implement.jsonl", "check.jsonl"):
+        jsonl_path = task_dir / jsonl_name
+        if not jsonl_path.exists():
+            _write_seed_jsonl(jsonl_path)
+            seeded_jsonl = True
 
     # Handle --parent: establish bidirectional link
     if args.parent:

@@ -1,4 +1,0 @@
-{"file":".trellis/spec/backend/index.md","reason":"Backend/project guideline index for verification context."}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Quality and system-test contract checks to enforce during review."}
-{"file":".trellis/tasks/06-01-provider-manager-shared-pool-foundation/research/provider-manager-foundation.md","reason":"Task scope and expected Phase 1 Provider Manager evidence for verification."}
-{"file":".trellis/tasks/06-01-system-test-plan-architecture/system-test-results.md","reason":"Known real-system warmup blocker and prior WSL smoke baseline to compare against."}
