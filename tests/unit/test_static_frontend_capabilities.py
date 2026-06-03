@@ -33,7 +33,7 @@ def test_static_frontend_exposes_configurable_api_interfaces():
 
     assert "interfaceMode:'openai'" in app_js
     assert "aistudio.interfaceMode.v1" in app_js
-    assert "aistudio.apiSelection.v1" in app_js
+    assert "aistudio.apiSelection.v1" not in app_js
     assert "validInterfaceMode(value)" in app_js
     assert "if(this.models.length)this.ensureTextModelDefaults();else this.applyModelCapabilities()" in app_js
     assert "id:'openai',label:'OpenAI 兼容'" in app_js
@@ -309,6 +309,12 @@ def test_static_frontend_exposes_local_studio_workbench():
     assert "view==='studio'" in index_html
     assert "go('studio')" in index_html
     assert "openai.localStudio.settings.v1" in app_js
+    assert "providerProfiles" not in app_js
+    assert "activeProviderId" not in app_js
+    assert "active_provider_id" not in app_js
+    assert "provider_id:this.localStudioProviderId,providerType" not in app_js
+    assert "provider_type:active.type" not in app_js
+    assert "image_model:this.localStudioImageModel" not in app_js
     assert "localStudioProviders:[]" in app_js
     assert "localStudioSettings:{name:'',baseUrl:'',apiKey:'',timeout:300}" in app_js
     assert "localStudioProviderType:'google-ai-studio'" in app_js

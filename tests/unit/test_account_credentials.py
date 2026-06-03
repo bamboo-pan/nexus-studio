@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timezone
 
 import httpx
@@ -8,6 +9,7 @@ from fastapi import FastAPI
 from aistudio_api.api.dependencies import get_account_service
 from aistudio_api.api.routes_accounts import router as accounts_router
 from aistudio_api.application.account_service import AccountService
+from aistudio_api.infrastructure.account import account_store as account_store_module
 from aistudio_api.infrastructure.account.login_service import LoginService
 
 from aistudio_api.infrastructure.account.account_store import BACKUP_FORMAT, AccountStore
@@ -69,6 +71,19 @@ def test_import_credentials_accepts_single_storage_state(tmp_path):
     assert store.export_credentials(imported[0].id)["accounts"][0]["auth"]["cookies"][0]["value"] == "2"
 
 
+def test_account_store_does_not_auto_migrate_legacy_root_auth_file(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    data_dir = root / "data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "auth.json").write_text(json.dumps(storage_state()), encoding="utf-8")
+    monkeypatch.setattr(account_store_module, "_SEARCH_ROOTS", [root])
+
+    store = AccountStore(accounts_dir=data_dir / "accounts")
+
+    assert store.list_accounts() == []
+    assert not (data_dir / "accounts" / "acc_migrated").exists()
+
+
 def test_import_credentials_infers_email_from_storage_state(tmp_path):
     store = AccountStore(accounts_dir=tmp_path)
 
@@ -101,6 +116,22 @@ def test_import_credentials_restores_backup_metadata_when_possible(tmp_path):
     assert imported[0].name == "main"
     assert imported[0].email == "main@example.com"
     assert target.get_active_account().id == account.id
+
+
+def test_import_credentials_rejects_legacy_backup_auth_field_aliases(tmp_path):
+    source = AccountStore(accounts_dir=tmp_path / "source")
+    account = source.save_account("main", "main@example.com", storage_state())
+
+    for alias in ("storage_state", "storageState"):
+        backup = source.export_credentials(account.id)
+        storage = backup["accounts"][0].pop("auth")
+        backup["accounts"][0][alias] = storage
+        target = AccountStore(accounts_dir=tmp_path / f"target-{alias}")
+
+        with pytest.raises(ValueError, match="account auth"):
+            target.import_credentials(backup)
+
+        assert target.list_accounts() == []
 
 
 def test_import_credentials_rejects_malformed_storage_state(tmp_path):

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,15 +38,6 @@ def _resolve_accounts_dir() -> Path:
             return candidate
     # 默认在第一个搜索根下创建
     return (_SEARCH_ROOTS[0] / "data" / "accounts").resolve()
-
-
-def _resolve_legacy_auth_file() -> Path | None:
-    """查找遗留的 data/auth.json 文件。"""
-    for root in _SEARCH_ROOTS:
-        candidate = root / "data" / "auth.json"
-        if candidate.is_file():
-            return candidate
-    return None
 
 
 def _generate_account_id() -> str:
@@ -203,43 +193,10 @@ class AccountStore:
         self._registry_path = self._accounts_dir / "registry.json"
         self._registry: Registry | None = None
         self._ensure_dirs()
-        self._migrate_legacy_if_needed()
 
     def _ensure_dirs(self) -> None:
         """确保目录存在。"""
         self._accounts_dir.mkdir(parents=True, exist_ok=True)
-
-    def _migrate_legacy_if_needed(self) -> None:
-        """如果 accounts 目录为空且存在 data/auth.json，自动迁移。"""
-        if self._registry_path.exists():
-            return  # 已有注册表，无需迁移
-        legacy = _resolve_legacy_auth_file()
-        if legacy is None:
-            return
-        # 创建一个迁移账号
-        account_id = "acc_migrated"
-        now = datetime.now(timezone.utc).isoformat()
-        meta = AccountMeta(
-            id=account_id,
-            name="迁移的账号",
-            email=None,
-            created_at=now,
-            last_used=now,
-        )
-        account_dir = self._accounts_dir / account_id
-        account_dir.mkdir(parents=True, exist_ok=True)
-        # 复制 auth.json
-        shutil.copy2(legacy, account_dir / "auth.json")
-        # 写入 meta.json
-        (account_dir / "meta.json").write_text(
-            json.dumps(meta.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        # 创建注册表
-        registry = Registry(
-            accounts={account_id: meta},
-            active_account_id=account_id,
-        )
-        self._save_registry(registry)
 
     def _load_registry(self) -> Registry:
         """加载注册表。"""
@@ -515,9 +472,7 @@ class AccountStore:
         return account_id
 
     def _is_backup_package(self, payload: dict[str, Any]) -> bool:
-        return payload.get("format") == BACKUP_FORMAT or (
-            isinstance(payload.get("manifest"), dict) and isinstance(payload.get("accounts"), list)
-        )
+        return payload.get("format") == BACKUP_FORMAT
 
     def _import_backup_package(self, payload: dict[str, Any], *, activate: bool) -> list[AccountMeta]:
         if payload.get("format") != BACKUP_FORMAT:
@@ -538,7 +493,9 @@ class AccountStore:
             if not isinstance(entry, dict):
                 raise ValueError("credential backup account entries must be objects")
             meta_payload = entry.get("meta") if isinstance(entry.get("meta"), dict) else {}
-            storage_state = entry.get("auth") or entry.get("storage_state") or entry.get("storageState")
+            if "auth" not in entry:
+                raise ValueError("credential backup account auth must be a storage state object")
+            storage_state = entry.get("auth")
             detected_email = self._validate_storage_state(storage_state)
             meta_email = _normalize_email(meta_payload.get("email")) if "email" in meta_payload else None
             if meta_email and detected_email and meta_email.lower() != detected_email.lower():
