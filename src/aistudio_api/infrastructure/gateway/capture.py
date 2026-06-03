@@ -62,9 +62,9 @@ class RequestCaptureService:
         botguard_timeout_ms: int | None = None,
         template_capture_timeout_ms: int | None = None,
         template_recovery_attempts: int | None = None,
-    ) -> None:
+    ) -> CapturedRequest:
         capture_model = resolve_aistudio_wire_model(model)
-        await self._ensure_template(
+        template = await self._ensure_template(
             capture_model,
             retry_transient=retry_template_capture,
             navigation_timeout_ms=navigation_timeout_ms,
@@ -73,7 +73,9 @@ class RequestCaptureService:
             template_capture_timeout_ms=template_capture_timeout_ms,
             template_recovery_attempts=template_recovery_attempts,
         )
-        await self._session.generate_snapshot([self._build_capture_content(prompt=prompt, images=None)])
+        snapshot = await self._session.generate_snapshot([self._build_capture_content(prompt=prompt, images=None)])
+        body = modify_body(template.body, model=capture_model, prompt=prompt, snapshot=snapshot)
+        return CapturedRequest(url=template.url, headers=template.headers, body=body)
 
     async def capture(
         self,

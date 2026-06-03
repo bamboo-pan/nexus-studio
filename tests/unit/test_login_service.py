@@ -57,11 +57,13 @@ class FakeContext:
     def __init__(self, page, state):
         self.page = page
         self.state = state
+        self.storage_state_kwargs = []
 
     async def new_page(self):
         return self.page
 
-    async def storage_state(self):
+    async def storage_state(self, **kwargs):
+        self.storage_state_kwargs.append(kwargs)
         return self.state
 
 
@@ -115,6 +117,7 @@ def install_browser_fakes(monkeypatch, page, state):
         "playwright.async_api",
         SimpleNamespace(async_playwright=lambda: FakePlaywrightStarter(playwright)),
     )
+    return context
 
 
 def run_login_worker(service, session_id, store):
@@ -142,7 +145,7 @@ def test_login_worker_saves_verified_identity_without_immediate_activation(tmp_p
     session_id = "login_verified"
     service._sessions[session_id] = LoginSession(session_id=session_id)
     store = AccountStore(accounts_dir=tmp_path)
-    install_browser_fakes(monkeypatch, FakePage(email="user@example.com"), storage_state())
+    context = install_browser_fakes(monkeypatch, FakePage(email="user@example.com"), storage_state())
 
     run_login_worker(service, session_id, store)
 
@@ -154,3 +157,4 @@ def test_login_worker_saves_verified_identity_without_immediate_activation(tmp_p
     assert account is not None
     assert account.email == "user@example.com"
     assert store.get_active_account() is None
+    assert context.storage_state_kwargs == [{"indexed_db": True}]

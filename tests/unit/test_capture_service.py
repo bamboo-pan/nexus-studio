@@ -6,8 +6,9 @@ import pytest
 from aistudio_api.infrastructure.cache.snapshot_cache import SnapshotCache
 from aistudio_api.config import DEFAULT_WARMUP_TEXT_MODEL
 from aistudio_api.api.app import _warmup_with_retries
+from aistudio_api.domain.errors import AuthError
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
-from aistudio_api.infrastructure.gateway.capture import RequestCaptureService
+from aistudio_api.infrastructure.gateway.capture import CapturedRequest, RequestCaptureService
 
 
 class FakeBrowserSession:
@@ -79,6 +80,18 @@ class WarmupCaptureService:
 
     async def warmup(self, **kwargs):
         self.warmup_calls.append(kwargs)
+        return CapturedRequest(**await FakeBrowserSession().capture_template(kwargs["model"]))
+
+
+class WarmupReplayService:
+    def __init__(self, status=200, raw=b"ok"):
+        self.status = status
+        self.raw = raw
+        self.calls = []
+
+    async def replay(self, captured, body, timeout=None, **kwargs):
+        self.calls.append({"captured": captured, "body": body, "timeout": timeout, **kwargs})
+        return self.status, self.raw
 
 
 class FailingWarmupCaptureService:
@@ -174,6 +187,8 @@ def test_client_warmup_prepares_default_text_capture_template():
     try:
         client._session = session
         client._capture_service = capture_service
+        replay_service = WarmupReplayService()
+        client._replay_service = replay_service
 
         asyncio.run(client.warmup())
 
@@ -190,6 +205,9 @@ def test_client_warmup_prepares_default_text_capture_template():
                 "template_recovery_attempts": 1,
             }
         ]
+        assert replay_service.calls[0]["kind"] == "warmup_probe"
+        assert replay_service.calls[0]["model"] == DEFAULT_WARMUP_TEXT_MODEL
+        assert replay_service.calls[0]["timeout"] == 30
     finally:
         if original_session is not None:
             original_session._executor.shutdown(wait=False)
@@ -213,6 +231,22 @@ def test_client_warmup_propagates_template_warmup_failure():
             original_session._executor.shutdown(wait=False)
 
 
+def test_client_warmup_fails_hard_when_generate_content_probe_is_forbidden():
+    client = AIStudioClient(port=1)
+    original_session = client._session
+    try:
+        client._session = WarmupSession()
+        client._capture_service = WarmupCaptureService()
+        client._replay_service = WarmupReplayService(status=403, raw=b'[[null,[7,"The caller does not have permission"]]]')
+
+        with pytest.raises(AuthError, match="GenerateContent permission check failed"):
+            asyncio.run(client.warmup())
+    finally:
+        client._session = None
+        if original_session is not None:
+            original_session._executor.shutdown(wait=False)
+
+
 def test_startup_warmup_outer_retry_controls_template_attempt_count():
     session = AlwaysTimeoutWarmupSession()
     client = AIStudioClient(port=1)
@@ -225,6 +259,7 @@ def test_startup_warmup_outer_retry_controls_template_attempt_count():
     try:
         client._session = session
         client._capture_service = RequestCaptureService(session, SnapshotCache(ttl=60, max_size=10))
+        client._replay_service = WarmupReplayService()
 
         with pytest.raises(RuntimeError, match="Page.goto"):
             asyncio.run(_warmup_with_retries(client.warmup, label="test", attempts=3, backoff_seconds=(0.1, 0.2), sleep=sleep))

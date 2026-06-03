@@ -118,6 +118,12 @@ class LoginService:
             email = await self._extract_email_from_account_page(page)
         return email
 
+    async def _storage_state_with_indexed_db(self, context: Any) -> dict[str, Any]:
+        try:
+            return await context.storage_state(indexed_db=True)
+        except TypeError:
+            return await context.storage_state()
+
     async def _login_worker(
         self,
         session_id: str,
@@ -180,7 +186,7 @@ class LoginService:
 
             # 登录完成，保存 storage state
             logger.info("登录完成，保存 cookie")
-            storage_state = await context.storage_state()
+            storage_state = await self._storage_state_with_indexed_db(context)
 
             try:
                 detected_email = await self._verify_login_identity(

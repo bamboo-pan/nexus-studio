@@ -252,10 +252,13 @@ aistudio-api = "aistudio_api.main:main"
 #### 3. Contracts
 
 - `/health.warmup.status == "complete"` means the account browser warmup prepared a reusable text request template, not just that FastAPI is serving HTTP.
+- `/health.warmup.status == "complete"` also requires one successful browser-context `GenerateContent` replay probe for the warmup template; route readiness, textarea readiness, and template capture alone are not sufficient.
 - Startup warmup must use `AISTUDIO_WARMUP_TEXT_MODEL`; do not assume `AISTUDIO_DEFAULT_TEXT_MODEL` is safe for template capture because account/model permissions can differ from the request default.
 - Startup warmup has one retry owner: the app-level `_warmup_with_retries`. Startup capture must disable the inner template retry (`retry_template_capture=False`, `template_recovery_attempts=1`) so attempts remain bounded and observable.
 - Runtime request capture may keep its internal transient recovery retry; do not remove it just to simplify startup behavior.
 - Auth/sign-in/invalid account/validation failures are hard failures and must not be retried as transient navigation problems.
+- Browser login and credential import/export must preserve Playwright storage-state `origins[].indexedDB` when present. Google cookies and localStorage alone are not a sufficient AI Studio authorization proof.
+- When AI Studio navigation uses `/u/<authuser>/...`, request headers such as `x-goog-authuser` must come from the captured browser request. Header-only authuser rewrites are invalid because the bearer/session token can belong to a different Google account slot.
 
 #### 4. Validation & Error Matrix
 
@@ -263,23 +266,32 @@ aistudio-api = "aistudio_api.main:main"
 | --- | --- |
 | `Page.goto`/readiness/template timeout during startup | Retry only through `_warmup_with_retries`, then mark `/health.warmup.status` failed/partial if exhausted. |
 | Google sign-in, missing/invalid auth, unauthorized/forbidden, validation error | Do not retry; surface as hard warmup failure. |
+| Warmup template capture succeeds but replay returns 401/403 | Raise `AuthError`, mark warmup failed/partial, and isolate the account with a secret-safe re-login/import reason. |
+| Stored account has cookies/localStorage but no needed IndexedDB state | Local account health may report storage readability, but GenerateContent permission is verified only during browser warmup/request replay. |
 | Warmup model produces upstream permission denied while another text model can capture | Move the startup template model to `AISTUDIO_WARMUP_TEXT_MODEL`; do not silently change API request defaults. |
+| Route candidate needs a Google account slot | Prefer configured `/u/<authuser>/...` URL candidates, then unscoped legacy routes; do not rewrite only request headers after capture. |
 | Direct `AIStudioClient.warmup` or direct lifespan probe passes but `/health` gate fails | Record as a blocker; do not claim complete system-test pass. |
 | Provider Manager-only Phase 1 smoke passes while global Google warmup fails | Record Provider Manager pass separately and keep global system status blocked. |
 
 #### 5. Good/Base/Bad Cases
 
-- Good: `AIStudioClient.warmup()` captures `AISTUDIO_WARMUP_TEXT_MODEL`, disables inner startup retries, and `/health` reaches `complete` only after template readiness.
+- Good: `AIStudioClient.warmup()` captures `AISTUDIO_WARMUP_TEXT_MODEL`, disables inner startup retries, replays the rewritten `GenerateContent` probe once, and `/health` reaches `complete` only after upstream authorization succeeds.
 - Base: Unit tests assert startup capture kwargs, retry attempt counts, transient classification, and hard auth behavior.
 - Bad: Wrapping `AIStudioClient.warmup()` in app retries while `RequestCaptureService._ensure_template()` also retries internally for startup, multiplying minutes of hidden retry work.
+- Bad: Treating an AI Studio page that can open and capture a request as a healthy account when the actual GenerateContent replay returns 401/403.
+- Bad: Exporting/importing credentials through a schema that drops `origins[].indexedDB`.
 
 #### 6. Tests Required
 
 - Unit: classify transient vs hard warmup errors.
 - Unit: startup warmup passes bounded navigation/readiness/template budgets and uses `AISTUDIO_WARMUP_TEXT_MODEL`.
 - Unit: startup warmup does not internally retry template capture and outer retry controls attempt count.
+- Unit: warmup replay turns 401/403 into `AuthError` and does not report complete on permission failure.
+- Unit: credential import/export preserves optional `indexedDB` arrays.
+- Unit: account-pool warmup isolates auth failures with a secret-safe guidance reason.
 - Full unit suite after warmup changes.
-- Real WSL: `/health` gate must report `complete` before claiming global system-test pass; preserve artifact root and failure signature if it does not.
+- Real WSL API: exercise a copied real accounts directory and assert success or a diagnosed `authentication_error` rather than false-ready/500 behavior.
+- Real WSL UI: open Local Studio in Playwright, send a prompt, and assert `localStudioBusy == false` plus `localStudioCanSend == true` after success or any diagnosed upstream auth error.
 
 #### 7. Wrong vs Correct
 
@@ -295,11 +307,26 @@ Correct:
 
 ```python
 await _warmup_with_retries(client.warmup, label="Account browser")
-await capture_service.warmup(
+captured = await capture_service.warmup(
 		model=DEFAULT_WARMUP_TEXT_MODEL,
 		retry_template_capture=False,
 		template_recovery_attempts=1,
 )
+await replay_service.replay(captured, kind="warmup_probe")
+```
+
+Wrong:
+
+```python
+state = await context.storage_state()
+path.write_text(json.dumps(state))
+```
+
+Correct:
+
+```python
+state = await context.storage_state(indexed_db=True)
+path.write_text(json.dumps(state))
 ```
 
 ### Scenario: Architecture-Driven System Test Plan Updates
