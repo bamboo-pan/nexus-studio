@@ -22,10 +22,10 @@ Each phase contains numbered steps, such as `1.3 Configure context`. These numbe
 
 ## Skill Routing
 
-`workflow.md` separates routing by platform capability:
+`workflow.md` routes implementation and checking through the main session by default:
 
-- Platforms with sub-agent support: dispatch `trellis-implement` by default for implementation and `trellis-check` for checking.
-- Platforms without sub-agent support: the main session reads skills such as `trellis-before-dev`, then executes directly.
+- Before implementation, the main session loads `trellis-before-dev` and reads the relevant PRD, JSONL context, specs, and research files.
+- For checking, the main session loads `trellis-check`, reviews changes, fixes issues, and runs the necessary verification commands.
 
 When changing local AI behavior, update the routing descriptions in `workflow.md` first, then check whether the corresponding platform skill, command, or agent files need to stay in sync.
 
@@ -48,7 +48,7 @@ Hooks choose the right block based on current task status and inject it into the
 | `in_progress` | The task has entered implementation and checking. |
 | `completed` | The task is complete and waiting for wrap-up or archive. |
 
-If the user wants to change policies such as "whether to create a task when there is no task," "when task creation may be skipped," or "whether sub-agents are required," edit these state blocks and the routing table above them.
+If the user wants to change policies such as "whether to create a task when there is no task," "when task creation may be skipped," or "whether implementation/checking should stay in the main session," edit these state blocks and the routing table above them.
 
 ## Local Modification Patterns
 
@@ -60,7 +60,7 @@ Common changes:
 | Change task creation policy | Update the `no_task` state block and Phase 1 description. |
 | Change the default implementation/check path | Update Phase 2 and skill routing. |
 | Change the wrap-up flow | Update Phase 3 and `finish-work` related descriptions. Note the current split: Phase 3.4 = AI-driven code commits (batched plan shown, recognized task work committed without a confirmation gate), Phase 3.5 = `/finish-work` (archive + record session). `/finish-work` refuses to run if the working tree is dirty. |
-| Change platform differences | Update routing descriptions grouped by platform. |
+| Change platform differences | Update routing descriptions and any platform entry files that duplicate them. |
 
 After editing, make the AI reread `.trellis/workflow.md`; do not assume the flow from the old conversation is still valid.
 

@@ -1,4 +1,0 @@
-{"file":".trellis/spec/backend/index.md","reason":"Backend/project guideline index for implementation context."}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Testing and architecture-driven system test plan conventions relevant to Provider Manager gates."}
-{"file":".trellis/tasks/06-01-provider-manager-shared-pool-foundation/research/provider-manager-foundation.md","reason":"Task-specific codebase findings and scoped Phase 1 implementation plan."}
-{"file":".trellis/tasks/06-01-system-test-plan-architecture/research/architecture-test-plan-gap.md","reason":"Prior architecture-to-system-test-plan gap analysis that defines PM phase gate intent."}

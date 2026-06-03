@@ -267,13 +267,13 @@ def _get_task_status(trellis_dir: Path, hook_input: dict) -> str:
     return (
         f"Status: READY\nTask: {task_title}\n"
         f"Source: {active.source}\n"
-        "Next required action: dispatch `trellis-implement` per Phase 2.1. "
-        "For agent-capable platforms, the default is to NOT edit code in the main session. "
-        "After implementation, dispatch `trellis-check` per Phase 2.2 before reporting completion.\n"
-        "User override (per-turn escape hatch): if the user's CURRENT message explicitly tells the "
-        "main session to handle it directly (\"你直接改\" / \"别派 sub-agent\" / \"main session 写就行\" / "
-        "\"do it inline\" / \"不用 sub-agent\"), honor it for this turn and edit code directly. "
-        "Per-turn only; do NOT invent an override the user did not say."
+        "Next required action: load `trellis-before-dev`, read `prd.md`, curated jsonl entries, "
+        "and any `{TASK_DIR}/research/*.md`, then implement directly in the main session per Phase 2.1. "
+        "After implementation, load/run `trellis-check` in the main session per Phase 2.2 before reporting completion. "
+        "Before repeating any step, inspect existing artifacts/results and skip work that is already complete "
+        "for the current code state. "
+        "Before commit/finish, explicitly run/load `trellis-update-spec` for Phase 3.3 and record whether "
+        "spec updates were made; spec edits made during implementation/check do not replace this explicit judgment."
     )
 
 
@@ -378,14 +378,10 @@ Read and follow all instructions below carefully.
         "Project spec indexes are listed by path below. Each index contains a "
         "**Pre-Development Checklist** listing the specific guideline files to "
         "read before coding.\n\n"
-        "- If you're spawning an implement/check sub-agent, context is injected "
-        "automatically via `{task}/implement.jsonl` / `check.jsonl`. You do NOT "
-        "need to read these indexes yourself.\n"
-        "- For agent-capable platforms, the default is to dispatch "
-        "`trellis-implement` and `trellis-check` (so JSONL context is loaded by "
-        "the sub-agents) rather than editing code in the main session. "
-        "Honor a per-turn user override only if the user's current message "
-        "explicitly opts out (see <task-status> below for override phrases).\n\n"
+        "- The main session is responsible for reading relevant spec indexes and "
+        "curated `{task}/implement.jsonl` / `check.jsonl` entries before coding/checking.\n"
+        "- Load `trellis-before-dev` before implementation and `trellis-check` before completion. "
+        "Do not repeat already completed `[once]` steps; continue from the next unfinished step.\n\n"
     )
 
     # guides/ inlined (cross-package thinking, broadly useful)

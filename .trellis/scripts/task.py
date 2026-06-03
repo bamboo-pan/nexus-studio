@@ -365,11 +365,11 @@ def main() -> int:
             file=sys.stderr,
         )
         print(
-            "implement.jsonl / check.jsonl are now seeded on `task.py create` for",
+            "implement.jsonl / check.jsonl are now seeded on `task.py create`",
             file=sys.stderr,
         )
         print(
-            "sub-agent-capable platforms and curated by the AI during Phase 1.3.",
+            "and curated by the AI during Phase 1.3.",
             file=sys.stderr,
         )
         print("See .trellis/workflow.md Phase 1.3 or run:", file=sys.stderr)
