@@ -1,0 +1,17 @@
+{
+  "count": 2,
+  "accounts": [
+    {
+      "id": "acc_ecb5f1e6",
+      "tier": "free",
+      "health_status": "healthy",
+      "is_isolated": null
+    },
+    {
+      "id": "acc_d45e4ea5",
+      "tier": "free",
+      "health_status": "healthy",
+      "is_isolated": null
+    }
+  ]
+}

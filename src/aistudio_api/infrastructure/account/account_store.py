@@ -9,6 +9,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 # 默认搜索路径（与 config.py 保持一致）
 _SEARCH_ROOTS: list[Path] = [
@@ -25,6 +26,10 @@ BACKUP_WARNING = (
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
 ACCOUNT_TIERS = {"free", "pro", "ultra"}
 ACCOUNT_HEALTH_STATUSES = {"unknown", "healthy", "rate_limited", "isolated", "expired", "missing_auth", "error"}
+AI_STUDIO_GENERATE_READY_ERROR = (
+    "credential storage state must include AI Studio browser storage; re-login or import "
+    "a Playwright storage state captured after AI Studio fully loads"
+)
 
 
 def _resolve_accounts_dir() -> Path:
@@ -83,6 +88,28 @@ def _extract_email_from_storage_state(storage_state: dict[str, Any]) -> str | No
             if match:
                 return match.group(0)
     return None
+
+
+def _storage_state_has_aistudio_origin_storage(storage_state: dict[str, Any]) -> bool:
+    for origin in storage_state.get("origins", []):
+        if not isinstance(origin, dict):
+            continue
+        origin_value = origin.get("origin")
+        if not isinstance(origin_value, str):
+            continue
+        try:
+            hostname = urlparse(origin_value).hostname
+        except Exception:
+            hostname = None
+        if hostname != "aistudio.google.com":
+            continue
+        local_storage = origin.get("localStorage")
+        if isinstance(local_storage, list) and local_storage:
+            return True
+        indexed_db = origin.get("indexedDB")
+        if isinstance(indexed_db, list) and indexed_db:
+            return True
+    return False
 
 
 @dataclass
@@ -352,6 +379,13 @@ class AccountStore:
         """Validate a Playwright storage state and return any detected email."""
         return self._validate_storage_state(storage_state)
 
+    def validate_generate_ready_storage_state(self, storage_state: Any) -> str | None:
+        """Validate a storage state that is ready for AI Studio GenerateContent."""
+        detected_email = self._validate_storage_state(storage_state)
+        if not _storage_state_has_aistudio_origin_storage(storage_state):
+            raise ValueError(AI_STUDIO_GENERATE_READY_ERROR)
+        return detected_email
+
     def delete_account(self, account_id: str) -> bool:
         """删除账号，返回是否成功。"""
         registry = self._load_registry()
@@ -420,17 +454,23 @@ class AccountStore:
             return self._health_result(account, ok=False)
         try:
             storage_state = json.loads(auth_path.read_text(encoding="utf-8"))
-            detected_email = self._validate_storage_state(storage_state)
+            detected_email = self.validate_generate_ready_storage_state(storage_state)
             if detected_email and not account.email:
                 registry = self._load_registry()
                 registry.accounts[account_id].email = detected_email
                 account = registry.accounts[account_id]
                 self._write_meta(account)
                 self._save_registry(registry)
-            account = self.set_account_health(account_id, "healthy", "local storage state is readable and Google cookies are not expired; GenerateContent permission is verified during browser warmup") or account
+            account = self.set_account_health(account_id, "healthy", "local storage state includes AI Studio browser storage and Google cookies are not expired; GenerateContent permission is verified during browser warmup") or account
             return self._health_result(account, ok=True)
         except ValueError as exc:
-            status = "expired" if "expired" in str(exc).lower() else "error"
+            message = str(exc)
+            if "expired" in message.lower():
+                status = "expired"
+            elif message == AI_STUDIO_GENERATE_READY_ERROR:
+                status = "isolated"
+            else:
+                status = "error"
             account = self.set_account_health(account_id, status, str(exc)) or account
             return self._health_result(account, ok=False)
         except Exception as exc:

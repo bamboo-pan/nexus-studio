@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend spec index for gateway/API changes"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Quality requirements for account and real smoke behavior"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Error propagation guidance for upstream permission failures"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Logging guidance for auth/gateway diagnostics"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Model alias/config changes require search-first consistency"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Request model flows through API, capability, capture, and replay layers"}

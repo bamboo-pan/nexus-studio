@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from aistudio_api.config import DEFAULT_TEXT_MODEL
 from aistudio_api.infrastructure.cache.snapshot_cache import SnapshotCache
-from aistudio_api.infrastructure.gateway.request_rewriter import modify_body, resolve_aistudio_wire_model
+from aistudio_api.infrastructure.gateway.request_rewriter import modify_body, replace_body_model, resolve_aistudio_wire_model
 from aistudio_api.infrastructure.gateway.session import BrowserSession
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent, AistudioPart
 
@@ -56,6 +56,7 @@ class RequestCaptureService:
         prompt: str = "1",
         model: str = DEFAULT_TEXT_MODEL,
         *,
+        rewrite_body: bool = True,
         retry_template_capture: bool = True,
         navigation_timeout_ms: int | None = None,
         chat_ready_timeout_ms: int | None = None,
@@ -73,6 +74,9 @@ class RequestCaptureService:
             template_capture_timeout_ms=template_capture_timeout_ms,
             template_recovery_attempts=template_recovery_attempts,
         )
+        if not rewrite_body:
+            body = replace_body_model(template.body, model=capture_model)
+            return CapturedRequest(url=template.url, headers=template.headers, body=body)
         snapshot = await self._session.generate_snapshot([self._build_capture_content(prompt=prompt, images=None)])
         body = modify_body(template.body, model=capture_model, prompt=prompt, snapshot=snapshot)
         return CapturedRequest(url=template.url, headers=template.headers, body=body)

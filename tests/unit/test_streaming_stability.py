@@ -9,7 +9,7 @@ from aistudio_api.api.dependencies import get_client
 from aistudio_api.api.state import runtime_state
 from aistudio_api.application.account_rotator import AccountRotator
 from aistudio_api.application.account_service import AccountService
-from aistudio_api.application.api_service import _build_gemini_streaming_response, _build_streaming_response
+from aistudio_api.application.api_service import RequestAccountContext, _build_gemini_streaming_response, _build_streaming_response
 from aistudio_api.domain.errors import AuthError, RequestError
 from aistudio_api.infrastructure.account.account_store import AccountStore
 from aistudio_api.infrastructure.account.login_service import LoginService
@@ -58,6 +58,37 @@ class AuthRetryStreamClient:
             raise AuthError("stale auth")
         yield ("body", "hello")
         yield ("usage", {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+
+
+class AccountSwitchStreamClient:
+    def __init__(self, account_id: str, *, error: Exception | None = None, events=None):
+        self.account_id = account_id
+        self.error = error
+        self.events = list(events or [])
+        self.calls = []
+        self.clear_calls = 0
+
+    def clear_capture_state(self):
+        self.clear_calls += 1
+
+    async def stream_generate_content(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error is not None:
+            error = self.error
+            self.error = None
+            raise error
+        for event in self.events:
+            yield event
+
+
+class FakeStreamClientPool:
+    def __init__(self, clients: dict[str, AccountSwitchStreamClient]):
+        self.clients = clients
+        self.get_calls = []
+
+    async def get_client(self, account_id: str):
+        self.get_calls.append(account_id)
+        return self.clients.get(account_id)
 
 
 class DisconnectingRequest:
@@ -132,6 +163,69 @@ def account_runtime(tmp_path):
     account = store.save_account("main", None, storage_state(), tier="pro")
     service = AccountService(store, LoginService())
     return account, service, AccountRotator(store)
+
+
+def two_account_stream_runtime(tmp_path):
+    store = AccountStore(accounts_dir=tmp_path)
+    first = store.save_account("first", None, storage_state("sid", "1"), tier="free")
+    second = store.save_account("second", None, storage_state("sid", "2"), activate=False, tier="free")
+    rotator = AccountRotator(store)
+    clients = {
+        first.id: AccountSwitchStreamClient(first.id),
+        second.id: AccountSwitchStreamClient(second.id),
+    }
+    return store, first, second, rotator, clients, FakeStreamClientPool(clients)
+
+
+def run_stream_account_switch_test(tmp_path, build_response):
+    store, first, second, rotator, clients, pool = two_account_stream_runtime(tmp_path / "accounts")
+    old_busy_lock = runtime_state.busy_lock
+    old_account_service = runtime_state.account_service
+    old_rotator = runtime_state.rotator
+    old_account_client_pool = runtime_state.account_client_pool
+    runtime_state.busy_lock = asyncio.Semaphore(3)
+    runtime_state.account_service = AccountService(store, LoginService())
+    runtime_state.rotator = rotator
+    runtime_state.account_client_pool = pool
+
+    async def consume():
+        lease = await rotator.acquire_account("gemini-3.5-flash", affinity_key="stream-test")
+        assert lease is not None
+        failing_id = lease.account.id
+        replacement_id = second.id if failing_id == first.id else first.id
+        clients[failing_id].error = AuthError("GenerateContent permission check failed")
+        clients[replacement_id].events = [("body", "replacement ok"), ("usage", {"total_tokens": 2})]
+        account_context = RequestAccountContext(
+            client=clients[failing_id],
+            account=lease.account,
+            lease=lease,
+        )
+        response = build_response(clients[failing_id], account_context)
+        chunks = await collect_body_iterator(response)
+        return chunks, failing_id, replacement_id
+
+    try:
+        chunks, failing_id, replacement_id = asyncio.run(consume())
+    finally:
+        runtime_state.busy_lock = old_busy_lock
+        runtime_state.account_service = old_account_service
+        runtime_state.rotator = old_rotator
+        runtime_state.account_client_pool = old_account_client_pool
+
+    body = "".join(chunks)
+    stats = rotator.get_all_stats()
+    assert "replacement ok" in body
+    assert "GenerateContent permission check failed" not in body
+    assert body.rstrip().endswith("data: [DONE]")
+    assert clients[failing_id].clear_calls == 1
+    assert clients[failing_id].calls[0]["force_refresh_capture"] is False
+    assert clients[replacement_id].calls[0]["force_refresh_capture"] is True
+    assert stats[failing_id]["errors"] == 1
+    assert stats[failing_id]["in_flight"] == 0
+    assert stats[replacement_id]["success"] == 1
+    assert stats[replacement_id]["in_flight"] == 0
+    assert store.get_account(failing_id).health_status == "error"
+    assert store.get_account(replacement_id).health_status == "healthy"
 
 
 def test_openai_stream_error_chunk_has_sdk_compatible_shape_and_done_marker():
@@ -304,6 +398,24 @@ def test_openai_stream_auth_error_retries_with_fresh_capture_state():
     assert client.calls[1]["force_refresh_capture"] is True
 
 
+def test_openai_stream_auth_error_switches_account_before_error_event(tmp_path):
+    def build_response(client, account_context):
+        return _build_streaming_response(
+            client=client,
+            fallback_client=client,
+            capture_prompt="hello",
+            model="gemini-3.5-flash",
+            capture_images=None,
+            contents=[AistudioContent(role="user", parts=[AistudioPart(text="hello")])],
+            system_instruction=None,
+            cleanup_paths=[],
+            account_context=account_context,
+            affinity_key="stream-test",
+        )
+
+    run_stream_account_switch_test(tmp_path, build_response)
+
+
 def test_openai_stream_success_updates_active_account_stats(tmp_path):
     account, service, rotator = account_runtime(tmp_path / "accounts")
     client = FakeStreamClient(events=[("body", "hello"), ("usage", {"total_tokens": 2})])
@@ -427,6 +539,19 @@ def test_gemini_stream_auth_error_retries_with_fresh_capture_state():
     assert len(client.calls) == 2
     assert client.calls[0]["force_refresh_capture"] is False
     assert client.calls[1]["force_refresh_capture"] is True
+
+
+def test_gemini_stream_auth_error_switches_account_before_error_event(tmp_path):
+    def build_response(client, account_context):
+        return _build_gemini_streaming_response(
+            client=client,
+            fallback_client=client,
+            normalized=gemini_normalized(),
+            account_context=account_context,
+            affinity_key="stream-test",
+        )
+
+    run_stream_account_switch_test(tmp_path, build_response)
 
 
 def test_to_openai_tool_calls_stringifies_dict_arguments():

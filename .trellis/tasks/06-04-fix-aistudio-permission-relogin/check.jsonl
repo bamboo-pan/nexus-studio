@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend spec index for verification"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verification requirements for account/browser/gateway changes"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Check permission errors are surfaced correctly"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Check diagnostics avoid sensitive data"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Check model constants and aliases remain consistent"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check model identity remains consistent across layers"}

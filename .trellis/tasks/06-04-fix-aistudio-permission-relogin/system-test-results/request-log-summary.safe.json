@@ -1,0 +1,45 @@
+{
+  "group_total": 7,
+  "entry_total": 20,
+  "upstream_models": [
+    {
+      "kind": "local_studio_responses_stream",
+      "model": "gemini-3.5-flash",
+      "wire_model": null,
+      "status_code": 200,
+      "response_prefix": "event: response.created\ndata: {\"type\": \"response.created\", \"response\": {\"id\": \"resp_3f1e7a5720cf48328ba064b2\", \"object\": \"response\", \"created_at\": 1780682572, \""
+    },
+    {
+      "kind": "stream_generate_content",
+      "model": "gemini-3.5-flash",
+      "wire_model": "models/gemini-3.5-flash",
+      "status_code": 200,
+      "response_prefix": "[[[[[[[[null,\"**Assessing the Parameters**\\n\\nI'm currently dissecting the user's request. My focus is on the precise output specified and the developer's tone "
+    },
+    {
+      "kind": "stream_generate_content",
+      "model": "gemini-3.5-flash",
+      "wire_model": "models/gemini-3.5-flash",
+      "status_code": 200,
+      "response_prefix": "[[[[[[[[null,\"nexus-permission\"]],\"model\"]]],null,[92,3,211,null,[[1,92]],null,null,null,null,116],null,null,null,null,\"v1_ChdSQThqYXBEVE9aM2lfdU1QZ05LN3VBbxIXU"
+    }
+  ],
+  "status_codes": [
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200
+  ],
+  "preview_model_seen": false,
+  "target_model_seen": true,
+  "error_prefixes": [
+    "event: response.created\ndata: {\"type\": \"response.created\", \"response\": {\"id\": \"resp_3f1e7a5720cf48328ba064b2\", \"object\": \"response\", \"created_at\": 1780682572, \"",
+    "[[[[[[[[null,\"**Assessing the Parameters**\\n\\nI'm currently dissecting the user's request. My focus is on the precise output specified and the developer's tone ",
+    "[[[[[[[[null,\"nexus-permission\"]],\"model\"]]],null,[92,3,211,null,[[1,92]],null,null,null,null,116],null,null,null,null,\"v1_ChdSQThqYXBEVE9aM2lfdU1QZ05LN3VBbxIXU"
+  ]
+}

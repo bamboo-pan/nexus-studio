@@ -91,7 +91,7 @@ function app(){return{
   get imageModels(){return this.models.filter(m=>m.capabilities?.image_output)},
   get selectedImageModel(){return this.models.find(m=>m.id===this.imageModel)||this.imageModels[0]||{}},
   get textModels(){return this.models.filter(m=>m.capabilities?.text_output&&!m.capabilities?.image_output)},
-  get preferredTextModelIds(){return['gemini-3-flash-preview','gemma-4-31b-it']},
+  get preferredTextModelIds(){return['gemini-3.5-flash','gemini-3-flash-preview','gemma-4-31b-it']},
   get selectedPromptOptimizerModel(){return this.models.find(m=>m.id===this.imagePromptOptimizerModel)||this.textModels[0]||{}},
   get promptOptimizerSupportsThinking(){return this.selectedPromptOptimizerModel.capabilities?.thinking===true},
   get imageStyleTemplates(){return[

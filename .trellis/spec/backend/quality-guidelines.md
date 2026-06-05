@@ -99,3 +99,69 @@ Questions to answer:
 ```json
 {"format":"aistudio-api.credentials.backup","version":1,"accounts":[{"meta":{"name":"current"},"auth":{"cookies":[{"name":"sid","value":"...","domain":".google.com","path":"/"}],"origins":[]}}]}
 ```
+
+---
+
+## Scenario: AI Studio Native Generation Permission Boundary
+
+### 1. Scope / Trigger
+- Trigger: AI Studio text generation, warmup, capture, or replay changes that touch `BrowserSession`, `StreamingGateway`, request rewriting, account health, or real WSL system tests.
+- Scope: account-backed text generation for `/v1/chat/completions`, native AI Studio UI sends, request-log oracles, and Camoufox/Playwright process boundaries.
+
+### 2. Signatures
+- Internal helper command: `python -m aistudio_api.infrastructure.gateway.native_ui_sender`.
+- Helper stdin JSON: `{"auth_file": str, "model": str, "prompt": str, "timeout_ms": int}`.
+- Helper stdout JSON success: `{"ok": true, "status": int, "body_b64": str, "body_size": int, "wire_model": str, "url_path": str}`.
+- Helper stdout JSON failure: `{"ok": false, "error": str}` with a non-zero exit code.
+
+### 3. Contracts
+- Account-backed text-only API sends must decode the AI Studio wire body into `(model, prompt)` and send through the native UI helper subprocess before any browser/context raw replay.
+- The helper must launch a fresh Camoufox process, create a context with `storage_state=auth_file` and `service_workers="block"`, navigate through configured AI Studio authuser chat routes, select the requested text model, fill the exact prompt, click Run/Send, and return the matched `GenerateContent` response body.
+- Response matching must require both the target wire model and a prompt marker from the requested prompt; unrelated `GenerateContent` or `CountTokens` responses are not acceptable oracles.
+- Same-process native UI contexts may be used only when there is no account auth file, such as unit fakes or explicit unauthenticated diagnostics.
+- Raw browser/context replay is a last fallback only when the native UI path cannot parse/send the request. A returned native UI HTTP status is authoritative and must not be overwritten by raw replay.
+- Do not use `route.continue_(post_data=...)` to rewrite a production AI Studio generation request body.
+- Environment inherited by the helper includes `AISTUDIO_PROXY_SERVER`, `AISTUDIO_CAMOUFOX_GEOIP`, `AISTUDIO_CAMOUFOX_HEADLESS`, and `AISTUDIO_AUTHUSER_CANDIDATES`.
+
+### 4. Validation & Error Matrix
+- Missing `auth_file` path -> helper returns failure and parent falls back only if a non-UI replay path is explicitly allowed by the caller.
+- Wire body cannot decode to a text-only prompt -> native UI send is unavailable; browser replay may be attempted as a compatibility fallback.
+- Text request includes inline/file parts -> native UI send rejects with `native UI replay fallback only supports text-only requests`.
+- Native UI matched response status `401`, `403`, or `429` -> propagate that upstream status and body to normal error classification; do not retry raw replay first.
+- Helper produces no JSON or malformed base64 body -> parent raises a helper-result error instead of silently returning an empty response.
+- Request-log oracle sees `models/gemini-3-flash-preview` for a `gemini-3.5-flash` request -> system test must fail.
+
+### 5. Good/Base/Bad Cases
+- Good: `gemini-3.5-flash` API request uses a clean helper process, matched native UI response returns `200`, and request logs show `models/gemini-3.5-flash` with no auth/rate status.
+- Base: Warmup probes native `GenerateContent` with the configured warmup model before template capture, then captures a template for the same requested text model.
+- Bad: Same-process isolated context sends the API prompt after template capture and receives AI Studio `403`, even though the same account/model/prompt succeeds in a standalone clean Camoufox process.
+
+### 6. Tests Required
+- Unit: account-backed `_send_native_generate_content_body_sync` invokes `python -m aistudio_api.infrastructure.gateway.native_ui_sender`, passes auth/model/prompt/timeout over stdin, and decodes `body_b64`.
+- Unit: no-auth/fake sessions still use the in-process clean context path without installing transport init scripts.
+- Unit: invalid/non-wire bodies still exercise browser fetch/context request fallback.
+- Full unit suite: run `pytest tests/unit -q` after changing gateway replay, warmup, capture, or model rewrite behavior.
+- Real WSL system test: run `.trellis/tasks/06-04-fix-aistudio-permission-relogin/system-test-wsl.sh` and require `WARMUP_COMPLETE`, `API_STREAM_OK`, `UI_STREAM_OK`, `REQUEST_LOG_ORACLE_OK`, and `SYSTEM_TEST_PASS`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+```python
+# Same process/context after hook/template capture can return AI Studio 403.
+context = self._new_context_sync(install_init_scripts=False)
+status, raw = send_prompt_through_native_ui(context, model, prompt)
+if status == 403:
+	status, raw = self._browser_fetch_generate_content_sync(body=body, url=url, headers=headers, timeout_ms=timeout_ms)
+```
+
+#### Correct
+```python
+# Account-backed text generation crosses a process boundary before raw replay.
+model, prompt = self._native_text_replay_payload_from_body(body)
+status, raw = self._send_native_generate_content_subprocess_sync(
+	model=model,
+	prompt=prompt,
+	timeout_ms=timeout_ms,
+)
+return status, raw
+```

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
 from aistudio_api.config import DEFAULT_CAMOUFOX_PORT, DEFAULT_IMAGE_MODEL, DEFAULT_TEXT_MODEL, DEFAULT_WARMUP_TEXT_MODEL, settings
-from aistudio_api.domain.errors import RequestError, classify_error
+from aistudio_api.domain.errors import AuthError, ModelNotFoundError, RequestError, classify_error
 from aistudio_api.domain.models import ModelOutput, parse_image_output, parse_text_output
 from aistudio_api.infrastructure.cache.snapshot_cache import SnapshotCache
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest, RequestCaptureService
@@ -16,6 +17,7 @@ from aistudio_api.infrastructure.gateway.request_rewriter import TOOLS_TEMPLATES
 from aistudio_api.infrastructure.gateway.replay import RequestReplayService
 from aistudio_api.infrastructure.gateway.session import BrowserSession
 from aistudio_api.infrastructure.gateway.streaming import StreamingGateway
+from aistudio_api.infrastructure.gateway.wire_codec import resolve_aistudio_wire_model
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent, AistudioPart
 from aistudio_api.infrastructure.request_logs import RequestLogStore
 
@@ -41,13 +43,41 @@ _STARTUP_WARMUP_CHAT_READY_TIMEOUT_MS = 30_000
 _STARTUP_WARMUP_BOTGUARD_TIMEOUT_MS = 15_000
 _STARTUP_WARMUP_TEMPLATE_CAPTURE_TIMEOUT_MS = 30_000
 _WARMUP_PROBE_TIMEOUT_SECONDS = 30
+_DEFAULT_CAPTURE_TIMEOUT_SECONDS = 30
 
 AI_STUDIO_GENERATE_CONTENT_AUTH_GUIDANCE = (
     "AI Studio GenerateContent permission check failed. The browser can open AI Studio, "
     "but the stored auth state cannot generate content. Re-login or import the browser "
-    "session for the Google account that can generate in AI Studio; Playwright storage "
-    "state must include IndexedDB credentials."
+    "session for the Google account that can generate in AI Studio; Playwright storage state "
+    "must be captured after AI Studio fully loads."
 )
+
+
+def _configured_startup_capture_timeout_ms(default_ms: int) -> int:
+    try:
+        configured_ms = int(settings.timeout_capture) * 1000
+    except (TypeError, ValueError):
+        return default_ms
+    if configured_ms <= _DEFAULT_CAPTURE_TIMEOUT_SECONDS * 1000:
+        return default_ms
+    return max(default_ms, configured_ms)
+
+
+def _configured_warmup_probe_timeout_seconds() -> int:
+    if "AISTUDIO_TIMEOUT_REPLAY" not in os.environ:
+        return _WARMUP_PROBE_TIMEOUT_SECONDS
+    try:
+        configured_seconds = int(settings.timeout_replay)
+    except (TypeError, ValueError):
+        return _WARMUP_PROBE_TIMEOUT_SECONDS
+    return max(_WARMUP_PROBE_TIMEOUT_SECONDS, configured_seconds)
+
+
+def _expected_wire_model(model: str) -> str:
+    wire_model = resolve_aistudio_wire_model(model)
+    if not wire_model.startswith("models/"):
+        wire_model = f"models/{wire_model}"
+    return wire_model
 
 
 def image_replay_model_id(model: str) -> str:
@@ -92,21 +122,91 @@ class AIStudioClient:
     async def warmup(
         self,
         *,
-        navigation_timeout_ms: int = _STARTUP_WARMUP_NAVIGATION_TIMEOUT_MS,
-        chat_ready_timeout_ms: int = _STARTUP_WARMUP_CHAT_READY_TIMEOUT_MS,
-        botguard_timeout_ms: int = _STARTUP_WARMUP_BOTGUARD_TIMEOUT_MS,
-        template_capture_timeout_ms: int = _STARTUP_WARMUP_TEMPLATE_CAPTURE_TIMEOUT_MS,
+        navigation_timeout_ms: int | None = None,
+        chat_ready_timeout_ms: int | None = None,
+        botguard_timeout_ms: int | None = None,
+        template_capture_timeout_ms: int | None = None,
     ) -> None:
         """预热浏览器，启动 Camoufox 并准备首个文本请求所需的捕获模板。"""
+        navigation_timeout_ms = (
+            _configured_startup_capture_timeout_ms(_STARTUP_WARMUP_NAVIGATION_TIMEOUT_MS)
+            if navigation_timeout_ms is None
+            else navigation_timeout_ms
+        )
+        chat_ready_timeout_ms = (
+            _configured_startup_capture_timeout_ms(_STARTUP_WARMUP_CHAT_READY_TIMEOUT_MS)
+            if chat_ready_timeout_ms is None
+            else chat_ready_timeout_ms
+        )
+        botguard_timeout_ms = (
+            _configured_startup_capture_timeout_ms(_STARTUP_WARMUP_BOTGUARD_TIMEOUT_MS)
+            if botguard_timeout_ms is None
+            else botguard_timeout_ms
+        )
+        template_capture_timeout_ms = (
+            _configured_startup_capture_timeout_ms(_STARTUP_WARMUP_TEMPLATE_CAPTURE_TIMEOUT_MS)
+            if template_capture_timeout_ms is None
+            else template_capture_timeout_ms
+        )
         if self._session is not None:
-            await self._session.ensure_context(
-                navigation_timeout_ms=navigation_timeout_ms,
-                chat_ready_timeout_ms=chat_ready_timeout_ms,
-            )
             try:
-                captured = await self._capture_service.warmup(
+                await self._warmup_with_authuser_failover(
+                    navigation_timeout_ms=navigation_timeout_ms,
+                    chat_ready_timeout_ms=chat_ready_timeout_ms,
+                    botguard_timeout_ms=botguard_timeout_ms,
+                    template_capture_timeout_ms=template_capture_timeout_ms,
+                )
+                logger.info("浏览器预热完成，文本请求模板已就绪")
+            except Exception as exc:
+                logger.warning("浏览器文本请求模板预热失败，仅完成页面预热: %s", exc)
+                raise
+
+    async def _warmup_with_authuser_failover(
+        self,
+        *,
+        navigation_timeout_ms: int,
+        chat_ready_timeout_ms: int,
+        botguard_timeout_ms: int,
+        template_capture_timeout_ms: int,
+    ) -> None:
+        if self._session is None:
+            return
+        last_auth_error: AuthError | None = None
+        while True:
+            probe_native = getattr(self._session, "probe_native_generate_content", None)
+            if callable(probe_native):
+                logger.info(
+                    "AI Studio warmup: probing native GenerateContent permission for model=%s before template capture",
+                    DEFAULT_WARMUP_TEXT_MODEL,
+                )
+                try:
+                    await self._probe_generate_content_permission(None, model=DEFAULT_WARMUP_TEXT_MODEL)
+                    logger.info("AI Studio warmup: GenerateContent permission probe passed")
+                except (AuthError, ModelNotFoundError) as exc:
+                    last_auth_error = exc
+                    self.clear_capture_state()
+                    advance = getattr(self._session, "advance_chat_route_after_auth_failure", None)
+                    if not callable(advance) or not await advance():
+                        raise last_auth_error
+                    logger.info("AI Studio GenerateContent probe failed for current authuser route; trying next candidate: %s", exc)
+                    continue
+
+                logger.info(
+                    "AI Studio warmup: ensuring browser context for model=%s",
+                    DEFAULT_WARMUP_TEXT_MODEL,
+                )
+                await self._session.ensure_context(
+                    navigation_timeout_ms=navigation_timeout_ms,
+                    chat_ready_timeout_ms=chat_ready_timeout_ms,
+                )
+                logger.info(
+                    "AI Studio warmup: capturing native template for model=%s",
+                    DEFAULT_WARMUP_TEXT_MODEL,
+                )
+                await self._capture_service.warmup(
                     prompt="1",
                     model=DEFAULT_WARMUP_TEXT_MODEL,
+                    rewrite_body=False,
                     retry_template_capture=False,
                     navigation_timeout_ms=navigation_timeout_ms,
                     chat_ready_timeout_ms=chat_ready_timeout_ms,
@@ -114,19 +214,82 @@ class AIStudioClient:
                     template_capture_timeout_ms=template_capture_timeout_ms,
                     template_recovery_attempts=1,
                 )
-                await self._probe_generate_content_permission(captured, model=DEFAULT_WARMUP_TEXT_MODEL)
-                logger.info("浏览器预热完成，文本请求模板已就绪")
-            except Exception as exc:
-                logger.warning("浏览器文本请求模板预热失败，仅完成页面预热: %s", exc)
-                raise
+                return
 
-    async def _probe_generate_content_permission(self, captured: CapturedRequest, *, model: str) -> None:
+            logger.info(
+                "AI Studio warmup: ensuring browser context for model=%s",
+                DEFAULT_WARMUP_TEXT_MODEL,
+            )
+            await self._session.ensure_context(
+                navigation_timeout_ms=navigation_timeout_ms,
+                chat_ready_timeout_ms=chat_ready_timeout_ms,
+            )
+            logger.info(
+                "AI Studio warmup: capturing native template for model=%s",
+                DEFAULT_WARMUP_TEXT_MODEL,
+            )
+            captured = await self._capture_service.warmup(
+                prompt="1",
+                model=DEFAULT_WARMUP_TEXT_MODEL,
+                rewrite_body=False,
+                retry_template_capture=False,
+                navigation_timeout_ms=navigation_timeout_ms,
+                chat_ready_timeout_ms=chat_ready_timeout_ms,
+                botguard_timeout_ms=botguard_timeout_ms,
+                template_capture_timeout_ms=template_capture_timeout_ms,
+                template_recovery_attempts=1,
+            )
+            logger.info(
+                "AI Studio warmup: probing GenerateContent permission for model=%s",
+                DEFAULT_WARMUP_TEXT_MODEL,
+            )
+            try:
+                await self._probe_generate_content_permission(captured, model=DEFAULT_WARMUP_TEXT_MODEL)
+                logger.info("AI Studio warmup: GenerateContent permission probe passed")
+                return
+            except AuthError as exc:
+                last_auth_error = exc
+                self.clear_capture_state()
+                advance = getattr(self._session, "advance_chat_route_after_auth_failure", None)
+                if not callable(advance) or not await advance():
+                    raise last_auth_error
+                logger.info("AI Studio GenerateContent probe failed for current authuser route; trying next candidate")
+
+    async def _probe_generate_content_permission(self, captured: CapturedRequest | None, *, model: str) -> None:
+        probe_native = getattr(self._session, "probe_native_generate_content", None)
+        if callable(probe_native):
+            timeout_seconds = _configured_warmup_probe_timeout_seconds()
+            status, raw, wire_model = await probe_native(model=model, timeout_ms=timeout_seconds * 1000)
+            expected_model = _expected_wire_model(model)
+            raw_text = raw.decode("utf-8", errors="replace")
+            logger.info(
+                "AI Studio warmup native probe result: requested=%s, wire_model=%s, status=%s, response_head=%s",
+                expected_model,
+                wire_model or "<unknown>",
+                status,
+                raw_text[:120],
+            )
+            if wire_model != expected_model:
+                raise AuthError(
+                    f"{AI_STUDIO_GENERATE_CONTENT_AUTH_GUIDANCE} Browser native warmup sent "
+                    f"{wire_model or '<unknown>'} instead of {expected_model}."
+                )
+            if status == 200:
+                return
+            classified = classify_error(status, raw_text)
+            if status in (401, 403):
+                raise type(classified)(f"{AI_STUDIO_GENERATE_CONTENT_AUTH_GUIDANCE} Upstream returned HTTP {status}: {raw_text[:200]}") from classified
+            raise classified
+
+        if captured is None:
+            raise RuntimeError("warmup replay probe requires a captured request")
+
         status, raw = await self._replay_request(
             captured,
             body=captured.body,
             kind="warmup_probe",
             model=model,
-            timeout=_WARMUP_PROBE_TIMEOUT_SECONDS,
+            timeout=_configured_warmup_probe_timeout_seconds(),
         )
         if status == 200:
             return

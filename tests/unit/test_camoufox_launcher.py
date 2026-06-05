@@ -41,6 +41,37 @@ def test_camoufox_launcher_sets_proxy_identity_when_proxy_is_configured(monkeypa
             return 0
 
     monkeypatch.setattr(settings, "proxy_server", "http://127.0.0.1:7890")
+    monkeypatch.setattr(settings, "camoufox_geoip", True)
+    monkeypatch.setattr(camoufox_launcher, "launch_options", fake_launch_options)
+    monkeypatch.setattr(camoufox_launcher, "get_nodejs", lambda: sys.executable)
+    monkeypatch.setattr(camoufox_launcher, "LAUNCH_SCRIPT", Path(__file__))
+    monkeypatch.setattr(camoufox_launcher.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+
+    try:
+        camoufox_launcher.launch_camoufox_server(port=1234, headless=True)
+    except RuntimeError as exc:
+        assert "terminated unexpectedly" in str(exc)
+
+    assert captured["proxy"] == {"server": "http://127.0.0.1:7890"}
+    assert captured["geoip"] is True
+    assert captured["i_know_what_im_doing"] is True
+
+
+def test_camoufox_launcher_can_use_manual_proxy_identity_when_geoip_is_disabled(monkeypatch):
+    captured = {}
+
+    def fake_launch_options(**options):
+        captured.update(options)
+        return options
+
+    class FakeProcess:
+        stdin = None
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(settings, "proxy_server", "http://127.0.0.1:7890")
+    monkeypatch.setattr(settings, "camoufox_geoip", False)
     monkeypatch.setattr(camoufox_launcher, "launch_options", fake_launch_options)
     monkeypatch.setattr(camoufox_launcher, "get_nodejs", lambda: sys.executable)
     monkeypatch.setattr(camoufox_launcher, "LAUNCH_SCRIPT", Path(__file__))

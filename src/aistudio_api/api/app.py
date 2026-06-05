@@ -40,7 +40,7 @@ _WARMUP_RETRY_ATTEMPTS = 3
 _WARMUP_RETRY_BACKOFF_SECONDS = (2.0, 5.0)
 GENERATE_CONTENT_AUTH_HEALTH_REASON = (
     "AI Studio GenerateContent returned an authorization failure; re-login or import the "
-    "browser session for the Google account that can generate in AI Studio, including IndexedDB storage state."
+    "browser session for the Google account that can generate in AI Studio after the page fully loads."
 )
 
 
@@ -178,6 +178,25 @@ def _account_pool_warmup_account_ids(
     return candidates
 
 
+def _run_account_startup_preflight(account_store: Any, accounts: list[Any]) -> list[str]:
+    failed_account_ids: list[str] = []
+    for account in accounts:
+        account_id = str(getattr(account, "id", "") or "")
+        if not account_id:
+            continue
+        result = account_store.test_account_health(account_id)
+        if result is None or result.get("ok"):
+            continue
+        failed_account_ids.append(account_id)
+        logger.warning(
+            "Account credential preflight failed before browser warmup: account=%s status=%s reason=%s",
+            account_id,
+            result.get("status"),
+            result.get("reason"),
+        )
+    return failed_account_ids
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from aistudio_api.config import settings
@@ -207,18 +226,23 @@ async def lifespan(app: FastAPI):
     # 初始化账号管理服务
     account_store = AccountStore()
     accounts = account_store.list_accounts()
+    startup_preflight_failed_accounts = _run_account_startup_preflight(account_store, accounts)
+    if accounts:
+        accounts = account_store.list_accounts()
     login_service = LoginService(port=settings.login_camoufox_port)
     account_service = AccountService(account_store, login_service)
     runtime_state.account_service = account_service
 
     active_account = account_store.get_active_account()
     active_auth_path = account_store.get_active_auth_path()
-    if active_auth_path is not None:
+    if active_auth_path is not None and active_account is not None and not active_account.is_isolated:
         await client.switch_auth(str(active_auth_path))
         if active_auth_path.exists():
             logger.info("Loaded active account auth state: %s", active_auth_path)
         else:
             logger.warning("Active account auth state file is missing: %s", active_auth_path)
+    elif active_account is not None and active_account.is_isolated:
+        logger.warning("Active account auth state was not loaded because the account is isolated: account=%s", active_account.id)
 
     # 初始化账号轮询器
     rotation_mode = getattr(settings, "account_rotation_mode", "round_robin")
@@ -309,6 +333,12 @@ async def lifespan(app: FastAPI):
             runtime_state.warmup_failed_accounts = []
             logger.info("Starting account browser warmup: accounts=%s limit=%d", account_warmup_ids, settings.account_warmup_limit)
             warmup_task = asyncio.create_task(_warmup_account_pool())
+        elif startup_preflight_failed_accounts:
+            runtime_state.warmup_status = "failed"
+            runtime_state.warmup_target_accounts = list(startup_preflight_failed_accounts)
+            runtime_state.warmup_completed_accounts = []
+            runtime_state.warmup_failed_accounts = list(startup_preflight_failed_accounts)
+            logger.warning("No accounts are eligible for browser warmup after credential preflight")
 
     yield
     logger.info("Shutting down")

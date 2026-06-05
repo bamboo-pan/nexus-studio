@@ -16,7 +16,7 @@ def test_static_frontend_uses_model_capabilities_for_controls():
     assert "if(this.controlAvailable('thinking')) body.thinking=this.cfg.thinking" in app_js
     assert "this.cfg.thinking!=='off') body.thinking" not in app_js
     assert "ensureTextModelDefaults" in app_js
-    assert "get preferredTextModelIds(){return['gemini-3-flash-preview','gemma-4-31b-it']}" in app_js
+    assert "get preferredTextModelIds(){return['gemini-3.5-flash','gemini-3-flash-preview','gemma-4-31b-it']}" in app_js
     assert "preferredTextModel(textModels=this.textModels)" in app_js
     assert "this.model=preferred?.id||textModels[0].id" in app_js
     assert "selectModel(m.id)" in index_html

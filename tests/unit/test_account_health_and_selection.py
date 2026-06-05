@@ -12,6 +12,7 @@ from aistudio_api.api.app import (
     _account_pool_warmup_account_ids,
     _is_transient_warmup_error,
     _record_account_warmup_failure,
+    _run_account_startup_preflight,
     _should_start_account_pool_warmup,
     _should_start_background_warmup,
     _warmup_with_retries,
@@ -32,7 +33,7 @@ from aistudio_api.infrastructure.account.login_service import LoginService
 from aistudio_api.infrastructure.account.tier_detector import AccountTier, TierResult
 
 
-def storage_state(cookie_name="sid", cookie_value="1", domain=".google.com", expires=None, email=None):
+def storage_state(cookie_name="sid", cookie_value="1", domain=".google.com", expires=None, email=None, indexed_db=False):
     cookie = {
         "name": cookie_name,
         "value": cookie_value,
@@ -43,12 +44,13 @@ def storage_state(cookie_name="sid", cookie_value="1", domain=".google.com", exp
         cookie["expires"] = expires
     origins = []
     if email:
-        origins = [
-            {
-                "origin": "https://aistudio.google.com",
-                "localStorage": [{"name": "account_email", "value": email}],
-            }
-        ]
+        origin = {
+            "origin": "https://aistudio.google.com",
+            "localStorage": [{"name": "account_email", "value": email}],
+        }
+        if indexed_db:
+            origin["indexedDB"] = [{"name": "firebaseLocalStorageDb", "version": 1, "stores": []}]
+        origins = [origin]
     return {"cookies": [cookie], "origins": origins}
 
 
@@ -199,6 +201,30 @@ def test_account_warmup_auth_failure_isolates_account_with_actionable_reason(tmp
     assert "sid1" not in refreshed.health_reason
 
 
+def test_startup_preflight_isolates_cookie_only_accounts_before_warmup(tmp_path):
+    store = AccountStore(accounts_dir=tmp_path)
+    stale = store.save_account("stale", None, storage_state())
+    ready = store.save_account(
+        "ready",
+        None,
+        storage_state(cookie_name="sid2", email="ready@example.com"),
+        activate=False,
+    )
+
+    failed = _run_account_startup_preflight(store, store.list_accounts())
+
+    assert failed == [stale.id]
+    assert store.get_account(stale.id).health_status == "isolated"
+    assert store.get_account(stale.id).is_isolated is True
+    assert store.get_account(ready.id).health_status == "healthy"
+    assert _account_pool_warmup_account_ids(
+        store.list_accounts(),
+        active_account_id=stale.id,
+        rotation_mode="round_robin",
+        warmup_limit=2,
+    ) == [ready.id]
+
+
 def test_warmup_with_retries_raises_after_transient_attempts_exhausted():
     calls = 0
     sleeps = []
@@ -266,6 +292,19 @@ def test_account_health_check_marks_valid_account_healthy_and_keeps_tier(tmp_pat
     assert refreshed.email == "user@example.com"
     assert refreshed.health_status == "healthy"
     assert refreshed.is_isolated is False
+
+
+def test_account_health_check_isolates_cookie_only_state(tmp_path):
+    store = AccountStore(accounts_dir=tmp_path)
+    account = store.save_account("main", None, storage_state(), tier="pro")
+
+    result = store.test_account_health(account.id)
+
+    refreshed = store.get_account(account.id)
+    assert result["ok"] is False
+    assert result["status"] == "isolated"
+    assert "AI Studio browser storage" in result["reason"]
+    assert refreshed.is_isolated is True
 
 
 def test_account_health_check_marks_expired_google_cookie_as_isolated(tmp_path):
