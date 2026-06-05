@@ -704,6 +704,35 @@ def _clear_client_capture_state(client: AIStudioClient) -> None:
         clear_snapshot_cache()
 
 
+async def _request_replacement_account_context(
+    *,
+    fallback_client: AIStudioClient,
+    model: str,
+    account_context: RequestAccountContext | None,
+    affinity_key: str | None,
+) -> RequestAccountContext | None:
+    if account_context is None or account_context.account_id is None:
+        return None
+    if getattr(runtime_state, "account_client_pool", None) is None or runtime_state.rotator is None:
+        return None
+
+    failed_account_id = account_context.account_id
+    try:
+        replacement_context = await _request_account_context(
+            fallback_client,
+            model,
+            exclude_account_id=failed_account_id,
+            affinity_key=affinity_key,
+        )
+    except HTTPException as exc:
+        logger.warning("No replacement account available after stream auth error: %s", exc.detail)
+        return None
+    if replacement_context.account_id is None:
+        return None
+    await account_context.release()
+    return replacement_context
+
+
 def _is_empty_image_response(exc: RequestError) -> bool:
     return exc.status == 0 and "no image data" in exc.message.lower()
 
@@ -2605,6 +2634,7 @@ async def handle_chat(req: ChatRequest, client: AIStudioClient, request: Request
                         include_usage = req.stream_options.include_usage
                     return _build_streaming_response(
                         client=request_client,
+                        fallback_client=client,
                         capture_prompt=normalized["capture_prompt"],
                         model=model,
                         capture_images=normalized["capture_images"] if normalized["capture_images"] else None,
@@ -2623,6 +2653,7 @@ async def handle_chat(req: ChatRequest, client: AIStudioClient, request: Request
                         sanitize_plain_text=response_format_overrides is None,
                         request=request,
                         account_context=account_context,
+                        affinity_key=affinity_key,
                     )
 
                 output = await request_client.generate_content(
@@ -2881,6 +2912,8 @@ def _build_streaming_response(
     sanitize_plain_text: bool = True,
     request: Request | None = None,
     account_context: RequestAccountContext | None = None,
+    fallback_client: AIStudioClient | None = None,
+    affinity_key: str | None = None,
 ) -> StreamingResponse:
     async def stream_response():
         busy_lock = runtime_state.busy_lock
@@ -2890,19 +2923,22 @@ def _build_streaming_response(
             return
 
         async with busy_lock:
+            active_client = client
+            active_account_context = account_context
             try:
                 chat_id = new_chat_id()
                 final_usage = None
                 saw_tool_calls = False
                 saw_content = False
-                for stream_attempt in range(2):
+                max_stream_attempts = 2
+                for stream_attempt in range(max_stream_attempts):
                     if await _request_disconnected(request):
                         logger.info("OpenAI stream disconnected before downstream call")
                         return
                     upstream = None
                     try:
                         try:
-                            upstream = client.stream_generate_content(
+                            upstream = active_client.stream_generate_content(
                                 model=model,
                                 capture_prompt=capture_prompt,
                                 capture_images=capture_images,
@@ -2952,20 +2988,35 @@ def _build_streaming_response(
                     except RequestError as exc:
                         if exc.status == 204 and stream_attempt == 0:
                             logger.warning("Stream 收到 204，清理 snapshot 缓存后重试一次")
-                            client.clear_snapshot_cache()
+                            _clear_client_capture_state(active_client)
                             continue
                         raise
                     except AuthError as exc:
+                        if saw_content:
+                            raise
+                        _clear_client_capture_state(active_client)
+                        if stream_attempt + 1 < max_stream_attempts:
+                            replacement_context = await _request_replacement_account_context(
+                                fallback_client=fallback_client or active_client,
+                                model=model,
+                                account_context=active_account_context,
+                                affinity_key=affinity_key,
+                            )
+                            if replacement_context is not None:
+                                logger.warning("Stream 鉴权异常，已排除当前账号并重试下一个账号: %s", exc)
+                                _record_request_result(model, "errors", account_id=_account_id_for_stats(active_account_context))
+                                active_account_context = replacement_context
+                                active_client = replacement_context.client
+                                continue
                         if stream_attempt == 0:
                             logger.warning("Stream 鉴权异常，清理 snapshot 缓存后重试一次: %s", exc)
-                            client.clear_snapshot_cache()
                             continue
                         raise
 
                 if not saw_content:
                     raise RequestError(502, "AI Studio returned no response content")
 
-                _record_request_result(model, "success", final_usage, account_id=_account_id_for_stats(account_context))
+                _record_request_result(model, "success", final_usage, account_id=_account_id_for_stats(active_account_context))
                 yield sse_chunk(chat_id, model, "", finish="tool_calls" if saw_tool_calls else "stop", include_usage=include_usage)
                 if include_usage:
                     yield sse_usage_chunk(chat_id, model, final_usage)
@@ -2974,7 +3025,7 @@ def _build_streaming_response(
                 logger.info("OpenAI stream cancelled by client")
                 raise
             except Exception as exc:
-                _record_request_result(model, "errors", account_id=_account_id_for_stats(account_context))
+                _record_request_result(model, "errors", account_id=_account_id_for_stats(active_account_context))
                 message, error_type, code = _openai_stream_error_detail(exc)
                 if error_type == "unsupported_feature":
                     logger.warning("OpenAI stream unsupported: %s", message)
@@ -2984,8 +3035,8 @@ def _build_streaming_response(
                 yield "data: [DONE]\n\n"
             finally:
                 cleanup_files(cleanup_paths)
-                if account_context is not None:
-                    await account_context.release()
+                if active_account_context is not None:
+                    await active_account_context.release()
 
     return StreamingResponse(
         stream_response(),
@@ -3037,7 +3088,14 @@ async def handle_gemini_generate_content(
                 )
 
                 if stream:
-                    return _build_gemini_streaming_response(client=request_client, normalized=normalized, request=request, account_context=account_context)
+                    return _build_gemini_streaming_response(
+                        client=request_client,
+                        normalized=normalized,
+                        request=request,
+                        account_context=account_context,
+                        fallback_client=client,
+                        affinity_key=affinity_key,
+                    )
 
                 output = await request_client.generate_content(
                     model=normalized["model"],
@@ -3130,6 +3188,8 @@ def _build_gemini_streaming_response(
     normalized: dict,
     request: Request | None = None,
     account_context: RequestAccountContext | None = None,
+    fallback_client: AIStudioClient | None = None,
+    affinity_key: str | None = None,
 ) -> StreamingResponse:
     async def stream_response():
         busy_lock = runtime_state.busy_lock
@@ -3139,18 +3199,21 @@ def _build_gemini_streaming_response(
             return
 
         async with busy_lock:
+            active_client = client
+            active_account_context = account_context
             try:
                 final_usage = None
                 saw_tool_calls = False
                 saw_content = False
-                for stream_attempt in range(2):
+                max_stream_attempts = 2
+                for stream_attempt in range(max_stream_attempts):
                     if await _request_disconnected(request):
                         logger.info("Gemini stream disconnected before downstream call")
                         return
                     upstream = None
                     try:
                         try:
-                            upstream = client.stream_generate_content(
+                            upstream = active_client.stream_generate_content(
                                 model=normalized["model"],
                                 capture_prompt=normalized["capture_prompt"],
                                 capture_images=normalized["capture_images"],
@@ -3227,20 +3290,35 @@ def _build_gemini_streaming_response(
                     except RequestError as exc:
                         if exc.status == 204 and stream_attempt == 0:
                             logger.warning("Gemini stream 收到 204，清理 snapshot 缓存后重试一次")
-                            client.clear_snapshot_cache()
+                            _clear_client_capture_state(active_client)
                             continue
                         raise
                     except AuthError as exc:
+                        if saw_content:
+                            raise
+                        _clear_client_capture_state(active_client)
+                        if stream_attempt + 1 < max_stream_attempts:
+                            replacement_context = await _request_replacement_account_context(
+                                fallback_client=fallback_client or active_client,
+                                model=normalized["model"],
+                                account_context=active_account_context,
+                                affinity_key=affinity_key,
+                            )
+                            if replacement_context is not None:
+                                logger.warning("Gemini stream 鉴权异常，已排除当前账号并重试下一个账号: %s", exc)
+                                _record_request_result(normalized["model"], "errors", account_id=_account_id_for_stats(active_account_context))
+                                active_account_context = replacement_context
+                                active_client = replacement_context.client
+                                continue
                         if stream_attempt == 0:
                             logger.warning("Gemini stream 鉴权异常，清理 snapshot 缓存后重试一次: %s", exc)
-                            client.clear_snapshot_cache()
                             continue
                         raise
 
                 if not saw_content:
                     raise RequestError(502, "AI Studio returned no response content")
 
-                _record_request_result(normalized["model"], "success", final_usage, account_id=_account_id_for_stats(account_context))
+                _record_request_result(normalized["model"], "success", final_usage, account_id=_account_id_for_stats(active_account_context))
                 finish_payload: dict[str, Any] = {
                     "candidates": [{"finishReason": "FUNCTION_CALL" if saw_tool_calls else "STOP"}]
                 }
@@ -3252,7 +3330,7 @@ def _build_gemini_streaming_response(
                 logger.info("Gemini stream cancelled by client")
                 raise
             except Exception as exc:
-                _record_request_result(normalized["model"], "errors", account_id=_account_id_for_stats(account_context))
+                _record_request_result(normalized["model"], "errors", account_id=_account_id_for_stats(active_account_context))
                 error_payload = _gemini_stream_error_payload(exc)
                 if error_payload.get("error", {}).get("status") == "UNIMPLEMENTED":
                     logger.warning("Gemini stream unsupported: %s", error_payload["error"].get("message"))
@@ -3262,8 +3340,8 @@ def _build_gemini_streaming_response(
                 yield "data: [DONE]\n\n"
             finally:
                 cleanup_files(normalized["cleanup_paths"])
-                if account_context is not None:
-                    await account_context.release()
+                if active_account_context is not None:
+                    await active_account_context.release()
 
     return StreamingResponse(
         stream_response(),

@@ -102,10 +102,10 @@ def test_model_metadata_includes_new_gemini_flash_model():
     assert any(item["id"] == "gemini-3.5-flash" for item in list_model_metadata())
 
 
-def test_model_metadata_lists_real_playground_default_before_newer_flash_alias():
+def test_model_metadata_lists_verified_playground_default_before_preview_alias():
     ids = [item["id"] for item in list_model_metadata()]
 
-    assert ids.index("gemini-3-flash-preview") < ids.index("gemini-3.5-flash")
+    assert ids.index("gemini-3.5-flash") < ids.index("gemini-3-flash-preview")
 
 
 def test_register_dynamic_models_makes_discovered_text_model_strictly_available():

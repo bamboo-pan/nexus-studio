@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DEFAULT_TEXT_MODEL = os.getenv("AISTUDIO_DEFAULT_TEXT_MODEL", "gemma-4-31b-it")
-DEFAULT_WARMUP_TEXT_MODEL = os.getenv("AISTUDIO_WARMUP_TEXT_MODEL", "gemini-3-flash-preview")
+DEFAULT_WARMUP_TEXT_MODEL = os.getenv("AISTUDIO_WARMUP_TEXT_MODEL", "gemini-3.5-flash")
 DEFAULT_IMAGE_MODEL = os.getenv("AISTUDIO_DEFAULT_IMAGE_MODEL", "gemini-3.1-flash-image-preview")
 DEFAULT_CAMOUFOX_PORT = 9222
 DEFAULT_RUNTIME_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
@@ -23,6 +23,13 @@ DEFAULT_TMP_DIR = tempfile.gettempdir()
 def _proxy_server() -> str | None:
     value = os.getenv("AISTUDIO_PROXY_SERVER")
     return value.strip() if value else None
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
 
 _AUTH_SEARCH_ROOTS = [
     Path(__file__).resolve().parents[2] / "data",  # 项目内 data/ 目录
@@ -57,6 +64,7 @@ class Settings:
     camoufox_geolocation_latitude: float = float(os.getenv("AISTUDIO_CAMOUFOX_GEOLOCATION_LATITUDE", "37.7749"))
     camoufox_geolocation_longitude: float = float(os.getenv("AISTUDIO_CAMOUFOX_GEOLOCATION_LONGITUDE", "-122.4194"))
     camoufox_geolocation_accuracy: int = int(os.getenv("AISTUDIO_CAMOUFOX_GEOLOCATION_ACCURACY", "100"))
+    camoufox_geoip: bool = _bool_env("AISTUDIO_CAMOUFOX_GEOIP", False)
     ai_studio_authuser_candidates: str = os.getenv("AISTUDIO_AUTHUSER_CANDIDATES", os.getenv("AISTUDIO_AUTHUSER", "2,0"))
     timeout_replay: int = int(os.getenv("AISTUDIO_TIMEOUT_REPLAY", "120"))
     timeout_stream: int = int(os.getenv("AISTUDIO_TIMEOUT_STREAM", "120"))
@@ -88,6 +96,11 @@ settings = Settings()
 
 def camoufox_proxy_identity_options() -> dict[str, object]:
     """Return stable browser identity hints for proxied Camoufox sessions."""
+    if settings.camoufox_geoip:
+        return {
+            "geoip": True,
+            "i_know_what_im_doing": True,
+        }
     return {
         "config": {
             "geolocation:latitude": settings.camoufox_geolocation_latitude,

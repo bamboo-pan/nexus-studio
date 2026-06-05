@@ -145,7 +145,7 @@ def test_modify_body_uses_requested_model_even_when_template_model_differs():
     assert body[0] == "models/gemini-3.1-flash-image-preview"
 
 
-def test_modify_body_maps_discovered_gemini_35_flash_to_stable_wire_model():
+def test_modify_body_preserves_gemini_35_flash_wire_model():
     original = '["models/gemini-3-flash-preview",[[[[null,"old"]],"user"]],null,[null,null,null,128],"!snap",null,null]'
 
     rewritten = modify_body(
@@ -155,7 +155,7 @@ def test_modify_body_maps_discovered_gemini_35_flash_to_stable_wire_model():
     )
 
     body = json.loads(rewritten)
-    assert body[0] == "models/gemini-3-flash-preview"
+    assert body[0] == "models/gemini-3.5-flash"
 
 
 def test_clear_capture_state_clears_session_template_cache():
@@ -185,7 +185,7 @@ def test_clear_capture_state_clears_session_template_cache():
     assert session.cleared is True
 
 
-def test_capture_resolves_model_alias_before_template_and_cache():
+def test_capture_uses_requested_model_for_template_cache_and_body():
     class FakeSnapshotCache:
         def __init__(self):
             self.get_models = []
@@ -221,10 +221,10 @@ def test_capture_resolves_model_alias_before_template_and_cache():
 
     captured = asyncio.run(service.capture("hello", model="gemini-3.5-flash"))
 
-    assert session.template_models == ["models/gemini-3-flash-preview"]
-    assert cache.get_models == ["models/gemini-3-flash-preview"]
-    assert cache.put_models == ["models/gemini-3-flash-preview"]
-    assert json.loads(captured.body)[0] == "models/gemini-3-flash-preview"
+    assert session.template_models == ["gemini-3.5-flash"]
+    assert cache.get_models == ["gemini-3.5-flash"]
+    assert cache.put_models == ["gemini-3.5-flash"]
+    assert json.loads(captured.body)[0] == "models/gemini-3.5-flash"
 
 
 def test_capture_with_images_obtains_template_before_rewrite():
@@ -263,10 +263,10 @@ def test_capture_with_images_obtains_template_before_rewrite():
 
     captured = asyncio.run(service.capture("hello", model="gemini-3.5-flash", images=["fake.png"]))
 
-    assert session.template_models == ["models/gemini-3-flash-preview"]
+    assert session.template_models == ["gemini-3.5-flash"]
     assert cache.get_calls == 0
     assert cache.put_calls == 0
-    assert json.loads(captured.body)[0] == "models/gemini-3-flash-preview"
+    assert json.loads(captured.body)[0] == "models/gemini-3.5-flash"
 
 
 def test_capture_force_refresh_obtains_template_before_rewrite():
@@ -300,6 +300,6 @@ def test_capture_force_refresh_obtains_template_before_rewrite():
 
     captured = asyncio.run(service.capture("hello", model="gemini-3.5-flash", force_refresh=True))
 
-    assert session.template_models == ["models/gemini-3-flash-preview"]
-    assert cache.put_model == "models/gemini-3-flash-preview"
+    assert session.template_models == ["gemini-3.5-flash"]
+    assert cache.put_model == "gemini-3.5-flash"
     assert json.loads(captured.body)[4] == "fresh-snapshot"

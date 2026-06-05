@@ -51,7 +51,7 @@ CONFIG_CATEGORIES = (
 CONFIG_OPTIONS: tuple[ConfigOption, ...] = (
     ConfigOption("AISTUDIO_USE_PURE_HTTP", "Pure HTTP 模式", "runtime", "运行模式", "bool", False, "启用实验性纯 HTTP 请求路径；开启后不启动浏览器，也会跳过账号浏览器预热。", "use_pure_http"),
     ConfigOption("AISTUDIO_DEFAULT_TEXT_MODEL", "默认文本模型", "runtime", "运行模式", "string", "gemma-4-31b-it", "CLI 和内部默认文本模型。"),
-    ConfigOption("AISTUDIO_WARMUP_TEXT_MODEL", "预热文本模型", "runtime", "运行模式", "string", "gemini-3-flash-preview", "启动账号浏览器预热时用于捕获可复用文本请求模板的模型。"),
+    ConfigOption("AISTUDIO_WARMUP_TEXT_MODEL", "预热文本模型", "runtime", "运行模式", "string", "gemini-3.5-flash", "启动账号浏览器预热时用于捕获可复用文本请求模板的模型。"),
     ConfigOption("AISTUDIO_DEFAULT_IMAGE_MODEL", "默认图片模型", "runtime", "运行模式", "string", "gemini-3.1-flash-image-preview", "未显式指定时使用的图片模型。"),
     ConfigOption("AISTUDIO_MAX_CONCURRENCY", "最大并发", "runtime", "运行模式", "int", 3, "后端请求并发信号量大小。", "max_concurrency", minimum=1, maximum=100),
     ConfigOption("AISTUDIO_PORT", "API 服务端口", "server", "服务与浏览器", "int", 8080, "FastAPI 服务监听端口。", "port", minimum=1, maximum=65535),
@@ -69,6 +69,7 @@ CONFIG_OPTIONS: tuple[ConfigOption, ...] = (
     ConfigOption("AISTUDIO_CAMOUFOX_GEOLOCATION_LATITUDE", "地理位置纬度", "identity", "浏览器身份", "float", 37.7749, "代理浏览器暴露的纬度。", "camoufox_geolocation_latitude", minimum=-90, maximum=90),
     ConfigOption("AISTUDIO_CAMOUFOX_GEOLOCATION_LONGITUDE", "地理位置经度", "identity", "浏览器身份", "float", -122.4194, "代理浏览器暴露的经度。", "camoufox_geolocation_longitude", minimum=-180, maximum=180),
     ConfigOption("AISTUDIO_CAMOUFOX_GEOLOCATION_ACCURACY", "定位精度", "identity", "浏览器身份", "int", 100, "代理浏览器地理位置精度，单位米。", "camoufox_geolocation_accuracy", minimum=0),
+    ConfigOption("AISTUDIO_CAMOUFOX_GEOIP", "代理自动地理位置", "identity", "浏览器身份", "bool", False, "代理浏览器自动按出口 IP 设置 timezone、locale 和地理位置；首次启用会下载 GeoIP 数据库，关闭后使用手动配置。", "camoufox_geoip"),
     ConfigOption("AISTUDIO_TMP_DIR", "临时目录", "storage", "存储路径", "path", str(DEFAULT_TMP_DIR), "上传、下载和中间文件临时目录。", "tmp_dir"),
     ConfigOption("AISTUDIO_REQUEST_LOGS_DIR", "请求记录目录", "storage", "存储路径", "path", str(DEFAULT_RUNTIME_DATA_DIR / "request-logs"), "请求记录 JSON 文件目录；开关已在请求记录页配置。", "request_logs_dir"),
     ConfigOption("AISTUDIO_GENERATED_IMAGES_DIR", "生成图片目录", "storage", "存储路径", "path", str(DEFAULT_RUNTIME_DATA_DIR / "generated-images"), "生成图片文件保存目录。", "generated_images_dir"),

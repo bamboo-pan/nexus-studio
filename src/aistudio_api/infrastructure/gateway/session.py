@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
+import os
+import subprocess
+import sys
 import threading
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from pathlib import Path
@@ -16,6 +19,7 @@ from typing import Any
 from urllib.parse import quote, urlparse
 
 from aistudio_api.config import camoufox_proxy_identity_options, settings
+from aistudio_api.domain.errors import ModelNotFoundError
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
 
 log = logging.getLogger("aistudio.session")
@@ -76,6 +80,10 @@ def _aistudio_chat_urls() -> tuple[str, ...]:
     urls = [f"https://aistudio.google.com/u/{authuser}/prompts/new_chat" for authuser in _configured_authuser_candidates()]
     urls.extend([AI_STUDIO_URL_UNSCOPED_FALLBACK, AI_STUDIO_URL_LEGACY_FALLBACK, AI_STUDIO_HOME_URL])
     return tuple(dict.fromkeys(urls))
+
+
+def _aistudio_chat_url_for_authuser(authuser: str) -> str:
+    return f"https://aistudio.google.com/u/{authuser}/prompts/new_chat"
 
 
 def _aistudio_image_urls(model: str) -> tuple[str, ...]:
@@ -150,14 +158,78 @@ AI_STUDIO_SEND_BUTTON_JS = r"""(clickButton) => {
     if (clickButton) target.click();
     return {found: true, clicked: !!clickButton, label};
 }"""
+TRANSPORT_HOOKS_JS = r"""(() => {
+    const xhrOpenHookAlive = XMLHttpRequest.prototype.open.__api_transport_hooked === true;
+    const xhrSendHookAlive = XMLHttpRequest.prototype.send.__api_transport_hooked === true;
+    const fetchHookAlive = window.fetch.__api_transport_hooked === true;
+    if (window.__api_transport_hooked && xhrOpenHookAlive && xhrSendHookAlive && fetchHookAlive) {
+        return 'transport_already_hooked';
+    }
+
+    const isGenerateContentUrl = (url) => String(url || '').includes('GenerateContent') && !String(url || '').includes('CountTokens');
+
+    const origOpen = XMLHttpRequest.prototype.open.__api_transport_original || XMLHttpRequest.prototype.open;
+    const origSend = XMLHttpRequest.prototype.send.__api_transport_original || XMLHttpRequest.prototype.send;
+    const hookedOpen = function(method, url, ...args) {
+        this.__url = String(url || '');
+        this.__is_gen = isGenerateContentUrl(url);
+        window.__last_hook_url = this.__url;
+        return origOpen.call(this, method, url, ...args);
+    };
+    hookedOpen.__api_transport_hooked = true;
+    hookedOpen.__api_transport_original = origOpen;
+    hookedOpen.__api_hooked = true;
+    XMLHttpRequest.prototype.open = hookedOpen;
+
+    const hookedSend = function(body) {
+        if (this.__is_gen && window.__pending_body) {
+            const captured = window.__pending_body;
+            window.__pending_body = null;
+            window.__hooked = true;
+            window.__last_hook_url = this.__url || '';
+            window.__last_hook_transport = 'xhr';
+            return origSend.call(this, captured);
+        }
+        return origSend.call(this, body);
+    };
+    hookedSend.__api_transport_hooked = true;
+    hookedSend.__api_transport_original = origSend;
+    XMLHttpRequest.prototype.send = hookedSend;
+
+    const origFetch = window.fetch.__api_transport_original || window.fetch;
+    const hookedFetch = function(input, init) {
+        let url = typeof input === 'string' ? input : (input instanceof Request ? input.url : String(input));
+        if (isGenerateContentUrl(url) && window.__pending_body) {
+            const captured = window.__pending_body;
+            window.__pending_body = null;
+            window.__hooked = true;
+            window.__last_hook_url = url;
+            window.__last_hook_transport = 'fetch';
+            if (init) {
+                init = Object.assign({}, init, {body: captured});
+            } else if (input instanceof Request) {
+                input = new Request(input, {body: captured});
+            } else {
+                init = {body: captured};
+            }
+            return origFetch.call(this, input, init);
+        }
+        return origFetch.call(this, input, init);
+    };
+    hookedFetch.__api_transport_hooked = true;
+    hookedFetch.__api_transport_original = origFetch;
+    hookedFetch.__api_hooked = true;
+    window.fetch = hookedFetch;
+
+    window.__api_transport_hooked = true;
+    return 'transport_hooked';
+})()"""
+INSTALL_TRANSPORT_HOOKS_JS = "mw:" + TRANSPORT_HOOKS_JS
+
 INSTALL_HOOKS_JS = r"""
 mw:((() => {
-    // Verify hooks are actually present on XHR prototype, not just a stale flag
-    const xhrHookAlive = XMLHttpRequest.prototype.open.__api_hooked === true;
-    const fetchHookAlive = window.fetch.__api_hooked === true;
-    if (window.__bg_hooked && xhrHookAlive && fetchHookAlive) return 'already_hooked';
-    // Reset stale flag if hooks are missing
-    if (window.__bg_hooked && (!xhrHookAlive || !fetchHookAlive)) window.__bg_hooked = false;
+    if (window.__bg_hooked && window.__snap_key) return 'already_hooked';
+    if (window.__bg_hooked && !window.__snap_key) window.__bg_hooked = false;
 
     const dms = window.default_MakerSuite;
     if (!dms) return 'no_default_MakerSuite';
@@ -189,54 +261,73 @@ mw:((() => {
         dms[snapKey].__api_hooked = true;
     }
 
-    // XHR hook for body replacement (always re-install if missing)
-    const origOpen = XMLHttpRequest.prototype.open;
-    const origSend = XMLHttpRequest.prototype.send;
-    const hookedOpen = function(method, url, ...args) {
-        this.__url = url;
-        this.__is_gen = url.includes('GenerateContent') && !url.includes('CountTokens');
-        window.__last_hook_url = url;
-        return origOpen.call(this, method, url, ...args);
-    };
-    hookedOpen.__api_hooked = true;
-    XMLHttpRequest.prototype.open = hookedOpen;
-    XMLHttpRequest.prototype.send = function(body) {
-        if (this.__is_gen && window.__pending_body) {
-            const captured = window.__pending_body;
-            window.__pending_body = null;
-            window.__hooked = true;
-            window.__last_hook_url = this.__url || '';
-            return origSend.call(this, captured);
-        }
-        return origSend.call(this, body);
-    };
-
-    // fetch hook for body replacement (streaming uses fetch)
-    const origFetch = window.fetch;
-    const hookedFetch = function(input, init) {
-        let url = typeof input === 'string' ? input : (input instanceof Request ? input.url : String(input));
-        if (url.includes('GenerateContent') && !url.includes('CountTokens') && window.__pending_body) {
-            const captured = window.__pending_body;
-            window.__pending_body = null;
-            window.__hooked = true;
-            window.__last_hook_url = url;
-            if (init) {
-                init.body = captured;
-            } else {
-                init = { body: captured };
-            }
-            return origFetch.call(this, input, init);
-        }
-        return origFetch.call(this, input, init);
-    };
-    hookedFetch.__api_hooked = true;
-    window.fetch = hookedFetch;
-
     window.__bg_hooked = true;
     window.__snap_key = snapKey;
     return 'hooked:' + snapKey;
 })())
 """
+
+BROWSER_FETCH_REPLAY_JS = r"""
+mw:(async ({url, headers, body, timeoutMs}) => {
+    window.__api_browser_fetch_replay = {url, headers, body};
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs) || 30000));
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: headers || {},
+            body,
+            credentials: 'include',
+            mode: 'cors',
+            signal: controller.signal,
+        });
+        const text = await response.text();
+        const responseHeaders = {};
+        try { response.headers.forEach((value, key) => { responseHeaders[key] = value; }); } catch(e) {}
+        return {status: response.status, body: text, url: response.url, headers: responseHeaders};
+    } catch (error) {
+        return {error: String((error && (error.stack || error.message)) || error)};
+    } finally {
+        clearTimeout(timer);
+    }
+})
+"""
+
+FORBIDDEN_BROWSER_FETCH_HEADERS = {
+    "accept-encoding",
+    "connection",
+    "content-length",
+    "cookie",
+    "date",
+    "dnt",
+    "expect",
+    "host",
+    "keep-alive",
+    "origin",
+    "permissions-policy",
+    "proxy-authorization",
+    "referer",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "user-agent",
+    "via",
+}
+
+FORBIDDEN_CONTEXT_REQUEST_HEADERS = {
+    "accept-encoding",
+    "connection",
+    "content-length",
+    "host",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
 
 DIALOG_CLEANUP_JS = """(() => {
     document.querySelectorAll('button').forEach((button) => {
@@ -480,19 +571,91 @@ AI_STUDIO_OPEN_MODEL_PICKER_JS = r"""(() => {
         return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
     };
     const isSendControl = (label) => /\b(run|send|generate)\b|运行|发送|生成/.test(label.toLowerCase());
-    const modelish = (label) => /model|模型|gemini|gemma|deep research|nano banana/i.test(label) || /\b(?:models\/)?(?:gemini|gemma|deep-research|learnlm)-[a-z0-9][a-z0-9._-]*\b/i.test(label);
-    const candidates = Array.from(document.querySelectorAll('mat-select, [role="combobox"], button, [role="button"]'));
-    for (const candidate of candidates) {
-        if (!visible(candidate)) continue;
-        if (candidate.disabled || candidate.getAttribute('aria-disabled') === 'true') continue;
+    const classOf = (el) => String(el.className || '');
+    const isGenericNavigation = (el, label) => {
+        const lower = label.toLowerCase();
+        const classes = classOf(el);
+        if (/\b(category-card|toggle-button)\b/.test(classes)) return true;
+        if (el.getAttribute?.('role') === 'radio') return true;
+        if (/^(models|agents)$/.test(lower)) return true;
+        return /featured test out|code and chat build|image generation create|video generation generate|speech and music|real-time/.test(lower);
+    };
+    const modelish = (label) => /\b(?:models\/)?(?:gemini|gemma|deep-research|learnlm)-[a-z0-9][a-z0-9._-]*\b/i.test(label) || /\b(gemini|gemma|deep research|learnlm|nano banana)\b/i.test(label);
+    const clickCandidate = (candidate) => {
         const label = textOf(candidate);
-        if (!label || isSendControl(label) || !modelish(label)) continue;
+        if (!visible(candidate) || candidate.disabled || candidate.getAttribute('aria-disabled') === 'true') return null;
+        if (!label || isSendControl(label) || isGenericNavigation(candidate, label)) return null;
         try { candidate.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
         candidate.click();
         return {opened: true, label: label.slice(0, 160)};
+    };
+    for (const candidate of Array.from(document.querySelectorAll('button.model-selector-card, .model-selector-card'))) {
+        const result = clickCandidate(candidate);
+        if (result) return result;
+    }
+    const candidates = Array.from(document.querySelectorAll('mat-select, [role="combobox"], button, [role="button"]'));
+    for (const candidate of candidates) {
+        const label = textOf(candidate);
+        if (!modelish(label)) continue;
+        const result = clickCandidate(candidate);
+        if (result) return result;
     }
     return {opened: false, reason: 'model_picker_not_found'};
 })()"""
+
+AI_STUDIO_SELECT_TEXT_MODEL_JS = r"""(model) => {
+    const targetModel = String(model || '').replace(/^models\//, '').toLowerCase();
+    if (!targetModel || targetModel.includes('image')) return {selected: false, reason: 'not_text_model'};
+
+    const textOf = (el) => String(
+        el?.innerText ||
+        el?.textContent ||
+        el?.getAttribute?.('aria-label') ||
+        el?.getAttribute?.('title') ||
+        el?.getAttribute?.('data-value') ||
+        el?.getAttribute?.('data-model') ||
+        ''
+    ).replace(/\s+/g, ' ').trim();
+    const visible = (el) => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const normalize = (value) => String(value || '').toLowerCase().replace(/^models\//, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const targetLabel = normalize(targetModel);
+    const targetTokens = targetLabel.split(' ').filter(Boolean);
+    const selectedNodes = () => Array.from(document.querySelectorAll('[aria-selected="true"], .selected, .active, .mat-mdc-option-active, [role="combobox"], mat-select'));
+    const selectedText = () => selectedNodes().filter(visible).map((node) => normalize(textOf(node))).join(' ');
+    const modelValueOf = (el) => normalize([
+        el.getAttribute?.('data-value'),
+        el.getAttribute?.('data-model'),
+        el.getAttribute?.('aria-label'),
+        el.getAttribute?.('title'),
+        textOf(el),
+    ].filter(Boolean).join(' '));
+    const matchesTarget = (el) => {
+        const value = modelValueOf(el);
+        if (!value) return false;
+        if (value.includes(targetModel) || value.includes(targetLabel)) return true;
+        if (targetModel === 'gemini-3.5-flash') return value.includes('gemini') && value.includes('3.5') && value.includes('flash');
+        return targetTokens.length > 0 && targetTokens.every((token) => value.includes(token));
+    };
+
+    const selected = selectedText();
+    if (selected.includes(targetModel) || selected.includes(targetLabel)) {
+        return {selected: false, reason: 'already_selected', label: selected.slice(0, 160)};
+    }
+
+    let candidates = Array.from(document.querySelectorAll('button, [role="button"], [role="option"], mat-option, [data-value], [data-model]'));
+    const visibleLabels = () => candidates.filter(visible).map(textOf).filter(Boolean).slice(0, 24);
+    for (const candidate of candidates) {
+        if (!visible(candidate) || !matchesTarget(candidate)) continue;
+        try { candidate.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
+        candidate.click();
+        return {selected: true, label: textOf(candidate).slice(0, 160), visible: visibleLabels()};
+    }
+    return {selected: false, reason: 'text_model_not_found', current: selected.slice(0, 160), visible: visibleLabels()};
+}"""
 
 
 class BrowserSession:
@@ -508,6 +671,9 @@ class BrowserSession:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aistudio-camoufox")
         self._botguard_lock = asyncio.Lock()
         self._snapshot_lock = asyncio.Lock()
+        self._preferred_chat_url: str | None = None
+        self._last_requested_chat_url: str | None = None
+        self._failed_chat_urls: set[str] = set()
 
     async def ensure_context(
         self,
@@ -527,6 +693,9 @@ class BrowserSession:
 
     def clear_templates(self) -> None:
         self._templates.clear()
+
+    async def advance_chat_route_after_auth_failure(self) -> bool:
+        return await self._run_sync(self._advance_chat_route_after_auth_failure_sync)
 
     async def detect_tier_for_auth_file(self, auth_file: str, timeout_ms: int = 30000):
         return await self._run_sync(self._detect_tier_for_auth_file_sync, auth_file, timeout_ms)
@@ -580,6 +749,9 @@ class BrowserSession:
 
     async def send_hooked_request(self, *, body: str, url: str, headers: dict[str, str], timeout_ms: int) -> tuple[int, bytes]:
         return await self._run_sync(self._send_hooked_request_sync, body, url, headers, timeout_ms)
+
+    async def probe_native_generate_content(self, *, model: str, timeout_ms: int) -> tuple[int, bytes, str]:
+        return await self._run_sync(self._probe_native_generate_content_sync, model, timeout_ms)
 
     async def send_streaming_request(self, *, body: str, url: str, headers: dict[str, str], timeout_ms: int):
         """Send a streaming request, yielding ("status", int) and ("chunk", bytes) events."""
@@ -635,181 +807,622 @@ class BrowserSession:
         loop: asyncio.AbstractEventLoop,
         cancel_event: threading.Event,
     ):
-        """Sync method: sends XHR request and consumes page-side stream events."""
+        """Sync method: triggers AI Studio's native request and forwards the response."""
         import time as _t
         _t0 = _t.time()
 
-        page, captured_url, captured_headers = self._prepare_streaming_sync(url, headers)
-        log.debug(f"[stream] prep done in {_t.time()-_t0:.1f}s, url={captured_url}")
-
-        timeout_s = timeout_ms / 1000
-        rid = uuid.uuid4().hex[:8]
-
-        # Start XHR in page context. Each request gets an isolated state object
-        # keyed by rid, allowing multiple concurrent XHRs on the same page.
-        page.evaluate("""(args) => {
-            const rid = args.rid;
-            if (!window.__streams) window.__streams = {};
-
-            const existing = window.__streams[rid];
-            if (existing && existing.xhr && existing.xhr.readyState !== 4) {
-                try { existing.xhr.abort(); } catch (e) {}
-            }
-
-            const state = {
-                xhr: null,
-                events: [],
-                waiter: null,
-                recvPos: 0,
-                statusSent: false,
-            };
-            window.__streams[rid] = state;
-
-            function push(event) {
-                if (state.waiter) {
-                    const waiter = state.waiter;
-                    state.waiter = null;
-                    waiter(event);
-                    return;
-                }
-                state.events.push(event);
-            }
-
-            function pushStatus(xhr) {
-                if (state.statusSent || xhr.readyState < 2) return;
-                state.statusSent = true;
-                push({type: 'status', status: xhr.status || 0});
-            }
-
-            function pushChunk(xhr) {
-                if (xhr.readyState < 3) return;
-                const chunk = xhr.responseText.substring(state.recvPos);
-                if (!chunk) return;
-                state.recvPos = xhr.responseText.length;
-                push({type: 'chunk', text: chunk});
-            }
-
-            if (!window.__stream_next) window.__stream_next = {};
-            window.__stream_next[rid] = function(timeoutMs) {
-                if (state.events.length) return Promise.resolve(state.events.shift());
-                return new Promise((resolve) => {
-                    let done = false;
-                    const timer = setTimeout(() => {
-                        if (done) return;
-                        done = true;
-                        if (state.waiter === finish) state.waiter = null;
-                        resolve({type: 'idle'});
-                    }, timeoutMs);
-                    const finish = (event) => {
-                        if (done) return;
-                        done = true;
-                        clearTimeout(timer);
-                        resolve(event);
-                    };
-                    state.waiter = finish;
-                });
-            };
-
-            if (!window.__stream_abort) window.__stream_abort = {};
-            window.__stream_abort[rid] = function() {
-                if (state.xhr && state.xhr.readyState !== 4) {
-                    try { state.xhr.abort(); } catch (e) {}
-                }
-            };
-
-            var xhr = new XMLHttpRequest();
-            xhr.open('POST', args.url);
-            var h = args.headers;
-            for (var k in h) {
-                xhr.setRequestHeader(k, h[k]);
-            }
-            xhr.withCredentials = true;
-            xhr.timeout = args.timeout * 1000;
-
-            xhr.onreadystatechange = function() {
-                pushStatus(xhr);
-                pushChunk(xhr);
-            };
-            xhr.onprogress = function() {
-                pushStatus(xhr);
-                pushChunk(xhr);
-            };
-            xhr.onload = function() {
-                pushStatus(xhr);
-                pushChunk(xhr);
-                push({type: 'done'});
-            };
-            xhr.onerror = function() {
-                push({type: 'error', message: 'network error'});
-            };
-            xhr.ontimeout = function() {
-                push({type: 'error', message: 'timeout'});
-            };
-            xhr.onabort = function() {
-                push({type: 'aborted'});
-            };
-
-            state.xhr = xhr;
-            xhr.send(args.body);
-        }""", {
-            "url": captured_url,
-            "headers": captured_headers,
-            "body": body,
-            "timeout": timeout_s,
-            "rid": rid,
-        })
-
-        deadline = _t.time() + timeout_s
-        status_sent = False
-        while _t.time() < deadline:
+        try:
             if cancel_event.is_set():
-                log.debug("[stream] cancellation requested for %s", rid)
-                page.evaluate("rid => { if (window.__stream_abort && window.__stream_abort[rid]) window.__stream_abort[rid](); }", rid)
-                break
-
-            event = page.evaluate("rid => window.__stream_next[rid](250)", rid)
-            event_type = event.get("type")
-
-            if event_type == "idle":
-                continue
-            if event_type == "status":
-                status = event.get("status", 0)
-                log.debug(f"[stream] got status={status} after {_t.time()-_t0:.1f}s")
-                loop.call_soon_threadsafe(queue.put_nowait, ("status", status))
-                status_sent = True
-                continue
-            if event_type == "chunk":
-                text = event.get("text") or ""
-                if text:
-                    loop.call_soon_threadsafe(queue.put_nowait, ("chunk", text.encode("utf-8")))
-                continue
-            if event_type == "error":
-                message = event.get("message", "unknown error")
-                log.debug(f"[stream] error after {_t.time()-_t0:.1f}s: {message}")
-                loop.call_soon_threadsafe(queue.put_nowait, ("error", RuntimeError(f"streaming request failed: {message}")))
-                loop.call_soon_threadsafe(queue.put_nowait, None)
                 return
-            if event_type in ("done", "aborted"):
-                break
-
-        if not status_sent:
-            log.debug(f"[stream] timeout after {_t.time()-_t0:.1f}s before response status")
-            loop.call_soon_threadsafe(queue.put_nowait, ("error", RuntimeError("streaming request timeout: no response status")))
+            status, raw = self._send_generate_content_with_fallback_sync(
+                body=body,
+                url=url,
+                headers=headers,
+                timeout_ms=timeout_ms,
+            )
+            if cancel_event.is_set():
+                return
+            log.debug("[stream] browser fetch replay done in %.1fs, status=%s", _t.time() - _t0, status)
+            loop.call_soon_threadsafe(queue.put_nowait, ("status", status))
+            if raw:
+                loop.call_soon_threadsafe(queue.put_nowait, ("chunk", raw))
+        except Exception as exc:
+            log.debug("[stream] native replay error after %.1fs: %s", _t.time() - _t0, exc)
+            loop.call_soon_threadsafe(queue.put_nowait, ("error", exc))
+        finally:
             loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    def _trigger_native_generate_content_sync(self, *, body: str, timeout_ms: int) -> tuple[int, bytes]:
+        import time as _t
+
+        page = self._ensure_hook_page_sync()
+        self._install_hooks_sync(page)
+        page.evaluate("mw:(body => { window.__pending_body = body; window.__hooked = false; window.__last_hook_url = ''; })", body)
+
+        response_holder: dict[str, Any] = {}
+        observed_responses: list[str] = []
+
+        def hook_state() -> dict[str, Any]:
+            try:
+                state = page.evaluate(
+                    "mw:(() => ({hooked: !!window.__hooked, transport: !!window.__api_transport_hooked, lastUrl: window.__last_hook_url || '', lastTransport: window.__last_hook_transport || ''}))()"
+                )
+            except Exception:
+                return {"hooked": False, "transport": False, "lastUrl": "", "lastTransport": ""}
+            return state if isinstance(state, dict) else {"hooked": False, "transport": False, "lastUrl": "", "lastTransport": ""}
+
+        def hook_state_suffix() -> str:
+            state = hook_state()
+            return (
+                f"hooked={bool(state.get('hooked'))}, "
+                f"transport={bool(state.get('transport'))}, "
+                f"last_url={state.get('lastUrl') or ''}, "
+                f"last_transport={state.get('lastTransport') or ''}"
+            )
+
+        def observed_suffix() -> str:
+            parts: list[str] = []
+            if observed_responses:
+                parts.append(f"responses={observed_responses}")
+            return f"; {'; '.join(parts)}" if parts else ""
+
+        def on_response(response):
+            if response_holder:
+                return
+            response_url = getattr(response, "url", "") or ""
+            if "CountTokens" in response_url:
+                return
+            response_request = getattr(response, "request", None)
+            response_request_body = getattr(response_request, "post_data", None)
+            if "GenerateContent" not in response_url and response_request_body != body:
+                return
+            try:
+                status = int(response.status)
+                raw = response.body()
+            except Exception as exc:
+                response_holder["error"] = exc
+                return
+            raw_len = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw or b"")
+            if (status == 204 or raw_len == 0) and len(observed_responses) < 5:
+                observed_responses.append(f"{response_url} status={status} body={raw_len}")
+                return
+            response_holder["status"] = status
+            response_holder["body"] = raw
+
+        page.on("response", on_response)
+        try:
+            page.evaluate(DIALOG_CLEANUP_JS)
+            textarea = page.query_selector("textarea")
+            if textarea is None:
+                raise RuntimeError("textarea not found during native replay")
+            self._fill_prompt_text_sync(page, textarea, "1")
+            page.wait_for_timeout(300)
+            if not self._click_run_button_sync(page):
+                raise RuntimeError("failed to trigger native GenerateContent request")
+
+            deadline = _t.time() + max(1.0, timeout_ms / 1000)
+            while _t.time() < deadline:
+                if response_holder:
+                    break
+                page.wait_for_timeout(100)
+            if not response_holder:
+                raise RuntimeError(f"native GenerateContent replay timeout; {hook_state_suffix()}{observed_suffix()}")
+            if "error" in response_holder:
+                raise RuntimeError(f"native GenerateContent replay failed: {response_holder['error']}")
+            state = hook_state()
+            if not bool(state.get("hooked")):
+                raise RuntimeError(f"native GenerateContent replay completed without body hook; {hook_state_suffix()}{observed_suffix()}")
+            status = int(response_holder.get("status") or 0)
+            raw = response_holder.get("body") or b""
+            if isinstance(raw, str):
+                raw = raw.encode("utf-8")
+            return status, raw
+        finally:
+            try:
+                page.remove_listener("response", on_response)
+            except Exception:
+                pass
+            try:
+                page.evaluate("mw:(() => { window.__pending_body = null; })()")
+            except Exception:
+                pass
+
+    def _send_generate_content_with_fallback_sync(self, *, body: str, url: str, headers: dict[str, str], timeout_ms: int) -> tuple[int, bytes]:
+        try:
+            native_status, native_raw = self._send_native_generate_content_body_sync(body=body, timeout_ms=timeout_ms)
+        except Exception as exc:
+            log.info("AI Studio native UI replay unavailable before browser replay: %s", exc)
+        else:
+            log.info("AI Studio native UI replay completed before browser replay: native_status=%s", native_status)
+            return native_status, native_raw
+
+        status, raw = self._browser_fetch_generate_content_sync(
+            body=body,
+            url=url,
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+        return status, raw
+
+    def _browser_fetch_generate_content_sync(self, *, body: str, url: str, headers: dict[str, str], timeout_ms: int) -> tuple[int, bytes]:
+        page = self._ensure_hook_page_sync()
+        self._install_hooks_sync(page)
+
+        context_request = getattr(self._ctx, "request", None) if self._ctx is not None else None
+        if context_request is not None:
+            replay_headers = self._context_request_headers(headers)
+            response = context_request.post(url, data=body, headers=replay_headers, timeout=timeout_ms)
+            status = int(getattr(response, "status", 0) or 0)
+            raw = response.body()
+            return status, raw
+
+        replay_headers = self._browser_fetch_headers(headers)
+        result = page.evaluate(
+            BROWSER_FETCH_REPLAY_JS,
+            {"url": url, "headers": replay_headers, "body": body, "timeoutMs": timeout_ms},
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(f"browser fetch replay returned unexpected result: {result!r}")
+        error = result.get("error")
+        if error:
+            raise RuntimeError(f"browser fetch replay failed: {error}")
+        status = int(result.get("status") or 0)
+        raw = result.get("body") or b""
+        if isinstance(raw, bytes):
+            return status, raw
+        return status, str(raw).encode("utf-8")
+
+    def _browser_fetch_headers(self, headers: dict[str, str]) -> dict[str, str]:
+        replay_headers: dict[str, str] = {}
+        for name, value in (headers or {}).items():
+            header_name = str(name)
+            lower_name = header_name.lower()
+            if lower_name.startswith("proxy-") or lower_name.startswith("sec-"):
+                continue
+            if lower_name in FORBIDDEN_BROWSER_FETCH_HEADERS:
+                continue
+            replay_headers[header_name] = str(value)
+        return replay_headers
+
+    def _context_request_headers(self, headers: dict[str, str]) -> dict[str, str]:
+        replay_headers: dict[str, str] = {}
+        for name, value in (headers or {}).items():
+            header_name = str(name)
+            lower_name = header_name.lower()
+            if lower_name in FORBIDDEN_CONTEXT_REQUEST_HEADERS:
+                continue
+            replay_headers[header_name] = str(value)
+        return replay_headers
+
+    def _send_native_generate_content_body_sync(self, *, body: str, timeout_ms: int) -> tuple[int, bytes]:
+        model, prompt = self._native_text_replay_payload_from_body(body)
+        if self._auth_file:
+            return self._send_native_generate_content_subprocess_sync(model=model, prompt=prompt, timeout_ms=timeout_ms)
+        return self._send_native_generate_content_prompt_sync(model=model, prompt=prompt, timeout_ms=timeout_ms)
+
+    def _send_native_generate_content_subprocess_sync(self, *, model: str, prompt: str, timeout_ms: int) -> tuple[int, bytes]:
+        payload = {
+            "auth_file": self._auth_file,
+            "model": model,
+            "prompt": prompt,
+            "timeout_ms": timeout_ms,
+        }
+        command = [sys.executable, "-m", "aistudio_api.infrastructure.gateway.native_ui_sender"]
+        timeout_seconds = max(60, int(timeout_ms / 1000) + 90)
+        completed = subprocess.run(
+            command,
+            input=json.dumps(payload, ensure_ascii=False),
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            env=os.environ.copy(),
+        )
+        result = self._parse_native_ui_sender_output(completed.stdout)
+        if completed.returncode != 0 or not result.get("ok"):
+            stderr = " ".join(str(completed.stderr or "").split())[:300]
+            error = str(result.get("error") or "native UI sender failed")[:300]
+            raise RuntimeError(f"native UI sender subprocess failed: {error}; stderr={stderr}")
+        try:
+            status = int(result.get("status") or 0)
+            raw = base64.b64decode(str(result.get("body_b64") or ""))
+        except Exception as exc:
+            raise RuntimeError(f"native UI sender returned malformed response: {result!r}") from exc
+        log.info(
+            "AI Studio native UI subprocess replay matched response: status=%s, wire_model=%s, body_size=%s, url_path=%s",
+            status,
+            result.get("wire_model") or "",
+            result.get("body_size") or len(raw),
+            result.get("url_path") or "",
+        )
+        return status, raw
+
+    def _parse_native_ui_sender_output(self, stdout: str) -> dict[str, Any]:
+        for line in reversed(str(stdout or "").splitlines()):
+            candidate = line.strip()
+            if not candidate.startswith("{"):
+                continue
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return {"ok": False, "error": "native UI sender produced no JSON result"}
+
+    def _native_text_replay_payload_from_body(self, body: str) -> tuple[str, str]:
+        from aistudio_api.infrastructure.gateway.wire_codec import AistudioWireCodec
+
+        request = AistudioWireCodec().decode(body)
+        model = request.model or ""
+
+        def content_text(content: AistudioContent) -> str:
+            parts: list[str] = []
+            for part in content.parts:
+                if part.inline_data or part.file_id:
+                    raise RuntimeError("native UI replay fallback only supports text-only requests")
+                if part.text:
+                    parts.append(str(part.text))
+            return "\n".join(parts).strip()
+
+        sections: list[str] = []
+        if request.system_instruction is not None:
+            system_text = content_text(request.system_instruction)
+            if system_text:
+                sections.append(f"System:\n{system_text}")
+
+        for content in request.contents:
+            text = content_text(content)
+            if not text:
+                continue
+            role = str(content.role or "user").strip() or "user"
+            if not sections and len(request.contents) == 1 and role == "user":
+                sections.append(text)
+            else:
+                sections.append(f"{role.capitalize()}:\n{text}")
+
+        prompt = "\n\n".join(sections).strip()
+        if not prompt:
+            raise RuntimeError("native UI replay fallback requires text prompt")
+        return model, prompt
+
+    def _send_native_generate_content_prompt_sync(self, *, model: str, prompt: str, timeout_ms: int) -> tuple[int, bytes]:
+        import time as _t
+
+        page, probe_context, close_probe_page = self._native_generate_content_probe_page_sync(fresh_chat_routes=True)
+        response_holder: dict[str, Any] = {}
+        observed_responses: list[str] = []
+        target_model = str(model or "").strip().removeprefix("models/")
+        prompt_marker = prompt.strip()[:80]
+
+        def observed_suffix() -> str:
+            parts: list[str] = []
+            if observed_responses:
+                parts.append(f"responses={observed_responses[:5]}")
+            return f"; {'; '.join(parts)}" if parts else ""
+
+        def wire_model_from_body(body: str | None) -> str:
+            if not body:
+                return ""
+            try:
+                parsed = json.loads(body)
+            except json.JSONDecodeError:
+                return ""
+            if not isinstance(parsed, list) or not parsed:
+                return ""
+            wire_model = parsed[0]
+            return str(wire_model or "") if isinstance(wire_model, str) else ""
+
+        def body_contains_prompt(body: str | None) -> bool:
+            if not body or not prompt_marker:
+                return False
+            try:
+                parsed = json.loads(body)
+            except json.JSONDecodeError:
+                return prompt_marker in body
+
+            def walk(value: Any) -> bool:
+                if isinstance(value, str):
+                    return prompt_marker in value
+                if isinstance(value, list):
+                    return any(walk(item) for item in value)
+                if isinstance(value, dict):
+                    return any(walk(item) for item in value.values())
+                return False
+
+            return walk(parsed)
+
+        def response_head(raw: bytes | str) -> str:
+            if isinstance(raw, bytes):
+                return raw[:220].decode("utf-8", errors="replace")
+            return str(raw)[:220]
+
+        def on_response(response):
+            if response_holder:
+                return
+            response_url = getattr(response, "url", "") or ""
+            if "CountTokens" in response_url:
+                return
+            try:
+                request_body = response.request.post_data
+            except Exception:
+                request_body = None
+            is_generate = "GenerateContent" in response_url or self._is_template_capture_request(
+                url=response_url,
+                body=request_body,
+                model_marker="",
+                allow_text_markers=True,
+            )
+            if not is_generate:
+                return
+            wire_model = wire_model_from_body(request_body)
+            response_model = wire_model.removeprefix("models/") if wire_model else ""
+            model_matches = bool(response_model and response_model == target_model)
+            prompt_matches = body_contains_prompt(request_body)
+            if not model_matches or not prompt_matches:
+                if len(observed_responses) < 5:
+                    observed_responses.append(
+                        f"{response_url} model={wire_model or '<unknown>'} model_match={model_matches} prompt_match={prompt_matches}"
+                    )
+                return
+            try:
+                status = int(response.status)
+                raw = response.body()
+            except Exception as exc:
+                response_holder["error"] = exc
+                return
+            raw_len = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw or b"")
+            if (status == 204 or raw_len == 0) and len(observed_responses) < 5:
+                observed_responses.append(f"{response_url} status={status} body={raw_len} model={wire_model}")
+                return
+            if status >= 400:
+                log.info(
+                    "AI Studio native UI replay fallback matched upstream error: status=%s, wire_model=%s, response_head=%s",
+                    status,
+                    wire_model,
+                    response_head(raw),
+                )
+            response_holder["status"] = status
+            response_holder["body"] = raw
+
+        try:
+            if not self._select_text_model_sync(page, model):
+                raise ModelNotFoundError(f"AI Studio text model not selected during native UI replay fallback: {model}")
+            page.wait_for_timeout(1300)
+            try:
+                page.evaluate("mw:(() => { window.__pending_body = null; window.__hooked = false; window.__last_hook_url = ''; })()")
+            except Exception:
+                pass
+
+            page.on("response", on_response)
+            page.evaluate(DIALOG_CLEANUP_JS)
+            textarea = page.query_selector("textarea")
+            if textarea is None:
+                raise RuntimeError("textarea not found during native UI replay fallback")
+            self._fill_prompt_text_sync(page, textarea, prompt)
+            page.wait_for_timeout(500)
+            try:
+                page.evaluate(DIALOG_CLEANUP_JS)
+            except Exception:
+                pass
+            if not self._click_run_button_sync(page):
+                raise RuntimeError("failed to trigger native UI replay fallback")
+
+            deadline = _t.time() + max(1.0, timeout_ms / 1000)
+            while _t.time() < deadline:
+                if response_holder:
+                    break
+                page.wait_for_timeout(100)
+            if not response_holder:
+                raise RuntimeError(f"native UI replay fallback timeout{observed_suffix()}")
+            if "error" in response_holder:
+                raise RuntimeError(f"native UI replay fallback failed: {response_holder['error']}")
+            status = int(response_holder.get("status") or 0)
+            raw = response_holder.get("body") or b""
+            if isinstance(raw, str):
+                raw = raw.encode("utf-8")
+            return status, raw
+        finally:
+            try:
+                page.remove_listener("response", on_response)
+            except Exception:
+                pass
+            try:
+                page.evaluate("mw:(() => { window.__pending_body = null; })()")
+            except Exception:
+                pass
+            if probe_context is not None:
+                try:
+                    probe_context.close()
+                except Exception:
+                    pass
+            elif close_probe_page:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+
+    def _goto_native_probe_page_sync(self, page, *, fresh_chat_routes: bool = False) -> None:
+        if not fresh_chat_routes:
+            self._goto_aistudio_with_options_sync(page)
             return
 
-        # Signal completion
-        loop.call_soon_threadsafe(queue.put_nowait, None)
+        saved_preferred_chat_url = self._preferred_chat_url
+        saved_last_requested_chat_url = self._last_requested_chat_url
+        saved_failed_chat_urls = set(self._failed_chat_urls)
+        selected_preferred_chat_url = None
+        selected_last_requested_chat_url = None
+        success = False
+        self._preferred_chat_url = None
+        self._last_requested_chat_url = None
+        self._failed_chat_urls.clear()
+        try:
+            self._goto_aistudio_with_options_sync(page)
+            selected_preferred_chat_url = self._preferred_chat_url
+            selected_last_requested_chat_url = self._last_requested_chat_url
+            success = True
+        finally:
+            self._failed_chat_urls.clear()
+            self._failed_chat_urls.update(saved_failed_chat_urls)
+            if success and selected_preferred_chat_url:
+                self._preferred_chat_url = selected_preferred_chat_url
+                self._last_requested_chat_url = selected_last_requested_chat_url
+            else:
+                self._preferred_chat_url = saved_preferred_chat_url
+                self._last_requested_chat_url = saved_last_requested_chat_url
 
-    def _prepare_streaming_sync(self, url: str, headers: dict[str, str]):
-        """Prepare page for streaming request. Returns (page, url, headers)."""
-        page = self._ensure_botguard_service_sync()
-        return page, url, headers
+    def _native_generate_content_probe_page_sync(self, *, fresh_chat_routes: bool = False):
+        probe_context = None
+        if self._browser is None and self._ctx is None and self._hook_page is not None:
+            return self._ensure_hook_page_sync(), None, False
+        if self._browser is None and self._ctx is not None:
+            page = self._ctx.new_page()
+            try:
+                log.info("AI Studio warmup native probe: opening clean chat page")
+                self._goto_native_probe_page_sync(page, fresh_chat_routes=fresh_chat_routes)
+                return page, None, True
+            except Exception:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+                raise
+
+        self._ensure_browser_process_sync()
+        probe_context = self._new_context_sync(install_init_scripts=not fresh_chat_routes)
+        page = probe_context.new_page()
+        try:
+            log.info("AI Studio warmup native probe: opening clean chat page in isolated context")
+            self._goto_native_probe_page_sync(page, fresh_chat_routes=fresh_chat_routes)
+            return page, probe_context, False
+        except Exception:
+            try:
+                probe_context.close()
+            except Exception:
+                pass
+            raise
+
+    def _probe_native_generate_content_sync(self, model: str, timeout_ms: int) -> tuple[int, bytes, str]:
+        import time as _t
+
+        page, probe_context, close_probe_page = self._native_generate_content_probe_page_sync()
+        response_holder: dict[str, Any] = {}
+        observed_responses: list[str] = []
+
+        def observed_suffix() -> str:
+            parts: list[str] = []
+            if observed_responses:
+                parts.append(f"responses={observed_responses[:5]}")
+            return f"; {'; '.join(parts)}" if parts else ""
+
+        def wire_model_from_body(body: str | None) -> str:
+            if not body:
+                return ""
+            try:
+                parsed = json.loads(body)
+            except json.JSONDecodeError:
+                return ""
+            if not isinstance(parsed, list) or not parsed:
+                return ""
+            wire_model = parsed[0]
+            return str(wire_model or "") if isinstance(wire_model, str) else ""
+
+        def on_response(response):
+            if response_holder:
+                return
+            response_url = getattr(response, "url", "") or ""
+            if "CountTokens" in response_url:
+                return
+            try:
+                request_body = response.request.post_data
+            except Exception:
+                request_body = None
+            is_generate = "GenerateContent" in response_url or self._is_template_capture_request(
+                url=response_url,
+                body=request_body,
+                model_marker="",
+                allow_text_markers=True,
+            )
+            if not is_generate:
+                return
+            wire_model = wire_model_from_body(request_body)
+            try:
+                status = int(response.status)
+                raw = response.body()
+            except Exception as exc:
+                response_holder["error"] = exc
+                return
+            raw_len = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw or b"")
+            if (status == 204 or raw_len == 0) and len(observed_responses) < 5:
+                observed_responses.append(f"{response_url} status={status} body={raw_len} model={wire_model or '<unknown>'}")
+                return
+            response_holder["status"] = status
+            response_holder["body"] = raw
+            response_holder["wire_model"] = wire_model
+
+        try:
+            if not self._select_text_model_sync(page, model):
+                raise ModelNotFoundError(f"AI Studio text model not selected during native GenerateContent permission probe: {model}")
+            page.wait_for_timeout(1300)
+            try:
+                page.evaluate("mw:(() => { window.__pending_body = null; window.__hooked = false; window.__last_hook_url = ''; })()")
+            except Exception:
+                pass
+
+            page.on("response", on_response)
+            page.evaluate(DIALOG_CLEANUP_JS)
+            textarea = page.query_selector("textarea")
+            if textarea is None:
+                raise RuntimeError("textarea not found during native GenerateContent permission probe")
+            textarea.fill("1")
+            page.wait_for_timeout(500)
+            try:
+                page.evaluate(DIALOG_CLEANUP_JS)
+            except Exception:
+                pass
+            if not self._click_run_button_sync(page):
+                raise RuntimeError("failed to trigger native GenerateContent permission probe")
+
+            deadline = _t.time() + max(1.0, timeout_ms / 1000)
+            while _t.time() < deadline:
+                if response_holder:
+                    break
+                page.wait_for_timeout(100)
+            if not response_holder:
+                raise RuntimeError(f"native GenerateContent permission probe timeout{observed_suffix()}")
+            if "error" in response_holder:
+                raise RuntimeError(f"native GenerateContent permission probe failed: {response_holder['error']}")
+            status = int(response_holder.get("status") or 0)
+            raw = response_holder.get("body") or b""
+            if isinstance(raw, str):
+                raw = raw.encode("utf-8")
+            wire_model = str(response_holder.get("wire_model") or "")
+            return status, raw, wire_model
+        finally:
+            try:
+                page.remove_listener("response", on_response)
+            except Exception:
+                pass
+            try:
+                page.evaluate("mw:(() => { window.__pending_body = null; })()")
+            except Exception:
+                pass
+            if probe_context is not None:
+                try:
+                    probe_context.close()
+                except Exception:
+                    pass
+            elif close_probe_page:
+                try:
+                    page.close()
+                except Exception:
+                    pass
 
     def _switch_auth_sync(self, auth_file: str | None) -> None:
         self._auth_file = auth_file
+        self._preferred_chat_url = None
+        self._last_requested_chat_url = None
+        self._failed_chat_urls.clear()
         self._templates.clear()
-        self._last_botguard_template = None
         self._close_sync()
 
     def _browser_options_sync(self) -> dict[str, Any]:
@@ -831,8 +1444,10 @@ class BrowserSession:
             return self._browser
         from camoufox.sync_api import Camoufox
 
+        log.info("AI Studio browser: launching Camoufox (proxy=%s, geoip=%s)", bool(settings.proxy_server), settings.camoufox_geoip)
         self._cf = Camoufox(**self._browser_options_sync())
         self._browser = self._cf.__enter__()
+        log.info("AI Studio browser: Camoufox launched")
         return self._browser
 
     def _ensure_browser_sync(self, navigation_timeout_ms: int | None = None, chat_ready_timeout_ms: int | None = None):
@@ -844,20 +1459,28 @@ class BrowserSession:
 
         self._close_sync()
         self._ensure_browser_process_sync()
+        log.info("AI Studio browser: creating context (auth_file=%s)", "set" if self._auth_file else "none")
         self._ctx = self._new_context_sync()
         self._hook_page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
         log.debug(f"[timing] browser launched in {_t.time()-_t0:.1f}s")
+        log.info("AI Studio browser: navigating to chat runtime")
         self._goto_aistudio_with_options_sync(
             self._hook_page,
             navigation_timeout_ms=navigation_timeout_ms,
             chat_ready_timeout_ms=chat_ready_timeout_ms,
         )
         log.debug(f"[timing] page loaded in {_t.time()-_t0:.1f}s")
+        log.info("AI Studio browser: installing page hooks")
         self._install_hooks_sync(self._hook_page)
         log.debug(f"[timing] hooks installed in {_t.time()-_t0:.1f}s")
+        log.info("AI Studio browser: context ready in %.1fs", _t.time() - _t0)
         return self._ctx
 
-    def _new_context_sync(self):
+    def _new_context_for_browser_sync(self, browser, *, install_init_scripts: bool = True):
+        def maybe_with_init_scripts(ctx):
+            return self._with_context_init_scripts_sync(ctx) if install_init_scripts else ctx
+
+        context_options = {"service_workers": "block"}
         if self._auth_file:
             auth_path = Path(self._auth_file)
             if not auth_path.exists():
@@ -866,18 +1489,29 @@ class BrowserSession:
                     "Activate an account or complete login again before browser preheat/capture."
                 )
             try:
-                return self._browser.new_context(storage_state=self._auth_file)
+                return maybe_with_init_scripts(
+                    browser.new_context(storage_state=self._auth_file, **context_options)
+                )
             except Exception:
-                ctx = self._browser.new_context()
+                ctx = browser.new_context(**context_options)
                 try:
                     self._apply_storage_state_sync(ctx, self._auth_file)
-                    return ctx
+                    return maybe_with_init_scripts(ctx)
                 except Exception as fallback_exc:
                     raise RuntimeError(
                         f"Browser auth state file is invalid: {auth_path}. "
                         "Activate an account or complete login again before browser preheat/capture."
                     ) from fallback_exc
-        return self._browser.new_context()
+        return maybe_with_init_scripts(browser.new_context(**context_options))
+
+    def _new_context_sync(self, *, install_init_scripts: bool = True):
+        return self._new_context_for_browser_sync(self._browser, install_init_scripts=install_init_scripts)
+
+    def _with_context_init_scripts_sync(self, ctx):
+        add_init_script = getattr(ctx, "add_init_script", None)
+        if add_init_script is not None:
+            add_init_script(script=TRANSPORT_HOOKS_JS)
+        return ctx
 
     def _detect_tier_for_auth_file_sync(self, auth_file: str, timeout_ms: int = 30000):
         from aistudio_api.infrastructure.account.tier_detector import detect_tier_sync
@@ -919,6 +1553,49 @@ class BrowserSession:
         self._install_hooks_sync(self._hook_page)
         return self._hook_page
 
+    def _chat_url_candidates(self) -> tuple[str, ...]:
+        urls = list(_aistudio_chat_urls())
+        if self._preferred_chat_url and self._preferred_chat_url in urls:
+            urls.remove(self._preferred_chat_url)
+            urls.insert(0, self._preferred_chat_url)
+        return tuple(urls)
+
+    def _route_candidate_for_url(self, url: str | None) -> str | None:
+        try:
+            parsed = urlparse(url or "")
+        except Exception:
+            return None
+        if parsed.hostname != AI_STUDIO_HOST:
+            return None
+        path = parsed.path or ""
+        parts = [part for part in path.split("/") if part]
+        if len(parts) >= 3 and parts[0] == "u" and parts[1].isdigit() and parts[2] == "prompts":
+            return _aistudio_chat_url_for_authuser(parts[1])
+        if path.startswith("/prompts/new_chat"):
+            return AI_STUDIO_URL_UNSCOPED_FALLBACK
+        if path.startswith("/app/prompts/new_chat"):
+            return AI_STUDIO_URL_LEGACY_FALLBACK
+        if path in ("", "/"):
+            return AI_STUDIO_HOME_URL
+        return None
+
+    def _advance_chat_route_after_auth_failure_sync(self) -> bool:
+        current = None
+        if self._hook_page is not None:
+            current = self._route_candidate_for_url(getattr(self._hook_page, "url", None))
+        current = current or self._preferred_chat_url
+        for failed_url in (current, self._preferred_chat_url, self._last_requested_chat_url):
+            if failed_url:
+                self._failed_chat_urls.add(failed_url)
+        self._preferred_chat_url = None
+        self._last_requested_chat_url = None
+        self._templates.clear()
+        remaining = [url for url in _aistudio_chat_urls() if url not in self._failed_chat_urls]
+        if not remaining:
+            return False
+        self._close_sync()
+        return True
+
     def _ensure_botguard_service_sync(
         self,
         navigation_timeout_ms: int | None = None,
@@ -927,6 +1604,7 @@ class BrowserSession:
     ):
         import time as _t
         _t0 = _t.time()
+        log.info("AI Studio botguard: ensuring hook page")
         page = self._ensure_hook_page_with_options_sync(
             navigation_timeout_ms=navigation_timeout_ms,
             chat_ready_timeout_ms=chat_ready_timeout_ms,
@@ -958,11 +1636,14 @@ class BrowserSession:
                 captured["url"] = request.url
                 captured["headers"] = dict(request.headers)
                 captured["body"] = body
+                route.abort()
+                return
             route.continue_()
 
         route_pattern = "**/*"
         page.route(route_pattern, on_route)
         try:
+            log.info("AI Studio botguard: triggering native send for service capture")
             if not self._click_run_button_sync(page):
                 raise RuntimeError("failed to trigger send while capturing BotGuardService")
 
@@ -973,6 +1654,7 @@ class BrowserSession:
                 if page.evaluate("mw:!!window.__bg_service"):
                     self._wait_until_idle_sync(page)
                     log.debug(f"[timing] botguard captured after {i+1}s, total {_t.time()-_t0:.1f}s")
+                    log.info("AI Studio botguard: captured after %.1fs", _t.time() - _t0)
                     return page
         finally:
             page.unroute(route_pattern, on_route)
@@ -1025,12 +1707,19 @@ class BrowserSession:
             log.debug(f"[timing] image template captured for {model} in {_t.time()-_t0:.1f}s")
             return captured
 
+        page = self._ensure_hook_page_with_options_sync(
+            navigation_timeout_ms=navigation_timeout_ms,
+            chat_ready_timeout_ms=chat_ready_timeout_ms,
+        )
+        if self._select_text_model_sync(page, model):
+            self._install_hooks_sync(page)
         page = self._ensure_botguard_service_with_options_sync(
             navigation_timeout_ms=navigation_timeout_ms,
             chat_ready_timeout_ms=chat_ready_timeout_ms,
             botguard_timeout_ms=botguard_timeout_ms,
         )
         log.debug(f"[timing] botguard done in {_t.time()-_t0:.1f}s, starting template capture")
+        log.info("AI Studio template: botguard ready; capturing template for model=%s", model)
         captured = self._capture_template_request_with_recovery_sync(
             page,
             model,
@@ -1041,6 +1730,7 @@ class BrowserSession:
         )
         self._templates[model] = captured
         log.debug(f"[timing] template captured for {model} in {_t.time()-_t0:.1f}s")
+        log.info("AI Studio template: captured for model=%s in %.1fs", model, _t.time() - _t0)
         return captured
 
     def _is_image_model(self, model: str) -> bool:
@@ -1140,6 +1830,8 @@ class BrowserSession:
                     chat_ready_timeout_ms=chat_ready_timeout_ms,
                 )
                 self._install_hooks_sync(page)
+                if not self._is_image_model(model) and self._select_text_model_sync(page, model):
+                    self._install_hooks_sync(page)
             try:
                 return self._capture_template_request_with_options_sync(
                     page,
@@ -1173,6 +1865,8 @@ class BrowserSession:
                         chat_ready_timeout_ms=chat_ready_timeout_ms,
                     )
                     self._install_hooks_sync(page)
+                    if self._select_text_model_sync(page, model):
+                        self._install_hooks_sync(page)
                     continue
                 raise
         if last_error is not None:
@@ -1413,47 +2107,14 @@ mw:((hash) => {
     def _send_hooked_request_sync(self, body: str, url: str, headers: dict[str, str], timeout_ms: int) -> tuple[int, bytes]:
         import time as _t
         _t0 = _t.time()
-        page = self._ensure_botguard_service_sync()
-        log.debug(f"[timing] botguard ready in {_t.time()-_t0:.1f}s")
-        captured_url = url
-        captured_headers = headers
-
-        # Replay via XHR in browser context (same approach as non-streaming replay_v2)
-        timeout_s = timeout_ms / 1000
-        result = page.evaluate("""(args) => {
-            return new Promise((resolve) => {
-                var xhr = new XMLHttpRequest();
-                xhr.open('POST', args.url);
-                var h = args.headers;
-                for (var k in h) {
-                    xhr.setRequestHeader(k, h[k]);
-                }
-                xhr.withCredentials = true;
-                xhr.timeout = args.timeout * 1000;
-                xhr.onload = function() {
-                    resolve({status: xhr.status, body: xhr.responseText});
-                };
-                xhr.onerror = function() {
-                    resolve({status: 0, body: 'network error'});
-                };
-                xhr.ontimeout = function() {
-                    resolve({status: 0, body: 'timeout'});
-                };
-                xhr.send(args.body);
-            });
-        }""", {
-            "url": captured_url,
-            "headers": captured_headers,
-            "body": body,
-            "timeout": timeout_s,
-        })
-
-        status = result.get("status", 0)
-        raw_text = result.get("body", "")
-        log.debug(f"[timing] replay done in {_t.time()-_t0:.1f}s, status={status}")
-        if status == 0:
-            raise RuntimeError(f"replay failed: {raw_text}")
-        return status, raw_text.encode("utf-8")
+        status, raw = self._send_generate_content_with_fallback_sync(
+            body=body,
+            url=url,
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+        log.debug("[timing] browser fetch replay done in %.1fs, status=%s", _t.time() - _t0, status)
+        return status, raw
 
     def _goto_aistudio_with_options_sync(
         self,
@@ -1513,9 +2174,12 @@ mw:((hash) => {
     ) -> None:
         import time as _t
         last_error = None
-        for url in _aistudio_chat_urls():
+        for url in self._chat_url_candidates():
+            if url in self._failed_chat_urls:
+                continue
             route_started_at = _t.time()
             goto_error = None
+            log.info("AI Studio navigation: trying %s", url)
             try:
                 page.goto(url, wait_until="commit", timeout=navigation_timeout_ms)
                 log.debug(f"[timing] goto {url} took {_t.time()-route_started_at:.1f}s")
@@ -1553,12 +2217,22 @@ mw:((hash) => {
             if self._wait_for_chat_runtime_sync(page, timeout_ms=chat_ready_timeout_ms):
                 if self._complete_aistudio_onboarding_sync(page):
                     self._wait_for_chat_runtime_sync(page, timeout_ms=chat_ready_timeout_ms)
+                final_chat_url = self._route_candidate_for_url(page.url)
+                if final_chat_url and final_chat_url in self._failed_chat_urls:
+                    last_error = RuntimeError(f"AI Studio redirected from {url} to failed chat route {final_chat_url}")
+                    self._failed_chat_urls.add(url)
+                    log.info("AI Studio navigation: skipping failed redirected chat route %s after trying %s", final_chat_url, url)
+                    continue
+                self._last_requested_chat_url = url
+                self._preferred_chat_url = final_chat_url or url
                 log.debug(f"[timing] UI ready (dms+textarea) after {_t.time()-route_started_at:.1f}s")
+                log.info("AI Studio navigation: chat runtime ready in %.1fs url=%s", _t.time() - route_started_at, page.url)
                 return
 
             diagnostics = self._format_chat_runtime_diagnostics_sync(page)
             last_error = RuntimeError(f"AI Studio chat runtime not ready after navigating to {url}: {diagnostics}")
             log.debug("[timing] UI not ready after %.1fs: %s", _t.time() - route_started_at, diagnostics)
+            log.info("AI Studio navigation: chat runtime not ready after %.1fs: %s", _t.time() - route_started_at, diagnostics)
         if last_error is not None:
             raise last_error
 
@@ -1776,6 +2450,47 @@ mw:((hash) => {
             )
         return prepared
 
+    def _select_text_model_sync(self, page, model: str) -> bool:
+        if self._is_image_model(model):
+            return False
+        target_model = str(model or "").strip().removeprefix("models/")
+        if not target_model:
+            return False
+        selected: dict[str, Any] | None = None
+        for attempt_index in range(2):
+            try:
+                page.evaluate(DIALOG_CLEANUP_JS)
+            except Exception:
+                pass
+            try:
+                opened = page.evaluate(AI_STUDIO_OPEN_MODEL_PICKER_JS)
+                if isinstance(opened, dict) and opened.get("opened"):
+                    page.wait_for_timeout(1000)
+            except Exception as exc:
+                log.debug("AI Studio text model picker open failed: %s", exc)
+            try:
+                raw_selected = page.evaluate(AI_STUDIO_SELECT_TEXT_MODEL_JS, target_model)
+            except Exception as exc:
+                log.debug("AI Studio text model selection failed: %s", exc)
+                return False
+            if not isinstance(raw_selected, dict):
+                return False
+            selected = raw_selected
+            if selected.get("selected") is True:
+                log.info("AI Studio text model selected: %s", selected.get("label", target_model))
+                page.wait_for_timeout(1200)
+                return True
+            if selected.get("reason") == "already_selected":
+                return True
+            if attempt_index == 0 and selected.get("reason") == "text_model_not_found":
+                page.wait_for_timeout(1000)
+                continue
+            break
+        reason = selected.get("reason") if isinstance(selected, dict) else None
+        if reason not in {"not_text_model"}:
+            log.info("AI Studio text model picker did not select %s: %s", target_model, reason)
+        return False
+
     def _aistudio_image_urls_for_model(self, model: str) -> tuple[str, ...]:
         return _aistudio_image_urls(model)
 
@@ -1857,6 +2572,7 @@ mw:((hash) => {
         return result
 
     def _install_hooks_sync(self, page) -> None:
+        self._install_transport_hooks_sync(page)
         try:
             result = page.evaluate(INSTALL_HOOKS_JS)
         except Exception as exc:
@@ -1881,6 +2597,16 @@ mw:((hash) => {
                 return
         diagnostics = self._format_chat_runtime_diagnostics_sync(page)
         raise RuntimeError(f"Hook install failed: {result}; {diagnostics}")
+
+    def _install_transport_hooks_sync(self, page) -> None:
+        try:
+            result = page.evaluate(INSTALL_TRANSPORT_HOOKS_JS)
+        except Exception as exc:
+            diagnostics = self._format_chat_runtime_diagnostics_sync(page)
+            raise RuntimeError(f"Transport hook install failed: {exc}; {diagnostics}") from exc
+        if result in {"transport_hooked", "transport_already_hooked"}:
+            return
+        raise RuntimeError(f"Transport hook install failed: {result}")
 
     def _click_run_button_sync(self, page) -> bool:
         try:

@@ -4,9 +4,9 @@ import json
 import pytest
 
 from aistudio_api.infrastructure.cache.snapshot_cache import SnapshotCache
-from aistudio_api.config import DEFAULT_WARMUP_TEXT_MODEL
+from aistudio_api.config import DEFAULT_WARMUP_TEXT_MODEL, settings
 from aistudio_api.api.app import _warmup_with_retries
-from aistudio_api.domain.errors import AuthError
+from aistudio_api.domain.errors import AuthError, ModelNotFoundError
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest, RequestCaptureService
 
@@ -67,18 +67,54 @@ class AlwaysTimeoutWarmupSession(FakeBrowserSession):
 
 
 class WarmupSession:
-    def __init__(self):
+    def __init__(self, events=None):
         self.ensure_context_calls = []
+        self.advance_calls = 0
+        self.events = events if events is not None else []
 
     async def ensure_context(self, **kwargs):
+        self.events.append("ensure")
         self.ensure_context_calls.append(kwargs)
+
+    async def advance_chat_route_after_auth_failure(self):
+        self.advance_calls += 1
+        return False
+
+
+class NativeProbeWarmupSession(WarmupSession):
+    def __init__(self, results=None, events=None):
+        super().__init__(events=events)
+        self.probe_calls = []
+        self.results = list(results or [(200, b"ok", f"models/{DEFAULT_WARMUP_TEXT_MODEL}")])
+
+    async def probe_native_generate_content(self, *, model: str, timeout_ms: int):
+        self.events.append("probe")
+        self.probe_calls.append({"model": model, "timeout_ms": timeout_ms})
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class FailoverWarmupSession(WarmupSession):
+    async def advance_chat_route_after_auth_failure(self):
+        self.advance_calls += 1
+        return self.advance_calls == 1
+
+
+class NativeProbeFailoverWarmupSession(NativeProbeWarmupSession):
+    async def advance_chat_route_after_auth_failure(self):
+        self.advance_calls += 1
+        return self.advance_calls == 1
 
 
 class WarmupCaptureService:
-    def __init__(self):
+    def __init__(self, events=None):
         self.warmup_calls = []
+        self.events = events if events is not None else []
 
     async def warmup(self, **kwargs):
+        self.events.append("capture")
         self.warmup_calls.append(kwargs)
         return CapturedRequest(**await FakeBrowserSession().capture_template(kwargs["model"]))
 
@@ -92,6 +128,16 @@ class WarmupReplayService:
     async def replay(self, captured, body, timeout=None, **kwargs):
         self.calls.append({"captured": captured, "body": body, "timeout": timeout, **kwargs})
         return self.status, self.raw
+
+
+class SequenceWarmupReplayService:
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
+
+    async def replay(self, captured, body, timeout=None, **kwargs):
+        self.calls.append({"captured": captured, "body": body, "timeout": timeout, **kwargs})
+        return self.results.pop(0)
 
 
 class FailingWarmupCaptureService:
@@ -164,6 +210,21 @@ def test_capture_warmup_does_not_store_reusable_prompt_snapshot():
     assert snapshot_cache._cache == {}
 
 
+def test_capture_warmup_can_return_native_template_body_for_permission_probe():
+    session = FakeBrowserSession()
+    snapshot_cache = SnapshotCache(ttl=60, max_size=10)
+    service = RequestCaptureService(session, snapshot_cache)
+
+    captured = asyncio.run(service.warmup(prompt="1", model="gemini-3.5-flash", rewrite_body=False))
+
+    assert session.template_calls == ["gemini-3.5-flash"]
+    assert session.snapshot_calls == []
+    body = json.loads(captured.body)
+    assert body[0] == "models/gemini-3.5-flash"
+    assert body[4] == "template-snapshot"
+    assert "template" in captured.body
+
+
 def test_client_switch_auth_clears_capture_templates(tmp_path):
     auth_file = tmp_path / "auth.json"
     auth_file.write_text("{}")
@@ -197,6 +258,7 @@ def test_client_warmup_prepares_default_text_capture_template():
             {
                 "prompt": "1",
                 "model": DEFAULT_WARMUP_TEXT_MODEL,
+                "rewrite_body": False,
                 "retry_template_capture": False,
                 "navigation_timeout_ms": 30000,
                 "chat_ready_timeout_ms": 30000,
@@ -208,6 +270,148 @@ def test_client_warmup_prepares_default_text_capture_template():
         assert replay_service.calls[0]["kind"] == "warmup_probe"
         assert replay_service.calls[0]["model"] == DEFAULT_WARMUP_TEXT_MODEL
         assert replay_service.calls[0]["timeout"] == 30
+    finally:
+        if original_session is not None:
+            original_session._executor.shutdown(wait=False)
+
+
+def test_client_warmup_prefers_native_generate_content_probe_when_available():
+    client = AIStudioClient()
+    original_session = client._session
+    events = []
+    session = NativeProbeWarmupSession(events=events)
+    capture_service = WarmupCaptureService(events=events)
+    try:
+        client._session = session
+        client._capture_service = capture_service
+        replay_service = WarmupReplayService()
+        client._replay_service = replay_service
+
+        asyncio.run(client.warmup())
+
+        assert session.probe_calls == [{"model": DEFAULT_WARMUP_TEXT_MODEL, "timeout_ms": 30000}]
+        assert session.ensure_context_calls == [{"navigation_timeout_ms": 30000, "chat_ready_timeout_ms": 30000}]
+        assert len(capture_service.warmup_calls) == 1
+        assert replay_service.calls == []
+        assert events == ["probe", "ensure", "capture"]
+
+    finally:
+        if original_session is not None:
+            original_session._executor.shutdown(wait=False)
+
+
+def test_client_warmup_retries_next_authuser_route_after_native_forbidden_probe():
+    client = AIStudioClient(port=1)
+    original_session = client._session
+    try:
+        events = []
+        session = NativeProbeFailoverWarmupSession(
+            [
+                (403, b'[[null,[7,"The caller does not have permission"]]]', f"models/{DEFAULT_WARMUP_TEXT_MODEL}"),
+                (200, b"ok", f"models/{DEFAULT_WARMUP_TEXT_MODEL}"),
+            ],
+            events=events,
+        )
+        capture_service = WarmupCaptureService(events=events)
+        client._session = session
+        client._capture_service = capture_service
+        client._replay_service = WarmupReplayService()
+
+        asyncio.run(client.warmup())
+
+        assert len(session.ensure_context_calls) == 1
+        assert session.advance_calls == 1
+        assert len(capture_service.warmup_calls) == 1
+        assert len(session.probe_calls) == 2
+        assert events == ["probe", "probe", "ensure", "capture"]
+    finally:
+        client._session = None
+        if original_session is not None:
+            original_session._executor.shutdown(wait=False)
+
+
+def test_client_warmup_retries_next_authuser_route_after_native_model_selection_failure():
+    client = AIStudioClient(port=1)
+    original_session = client._session
+    try:
+        events = []
+        session = NativeProbeFailoverWarmupSession(
+            [
+                ModelNotFoundError("AI Studio text model not selected during native GenerateContent permission probe"),
+                (200, b"ok", f"models/{DEFAULT_WARMUP_TEXT_MODEL}"),
+            ],
+            events=events,
+        )
+        capture_service = WarmupCaptureService(events=events)
+        client._session = session
+        client._capture_service = capture_service
+        client._replay_service = WarmupReplayService()
+
+        asyncio.run(client.warmup())
+
+        assert len(session.ensure_context_calls) == 1
+        assert session.advance_calls == 1
+        assert len(capture_service.warmup_calls) == 1
+        assert len(session.probe_calls) == 2
+        assert events == ["probe", "probe", "ensure", "capture"]
+    finally:
+        client._session = None
+        if original_session is not None:
+            original_session._executor.shutdown(wait=False)
+
+
+def test_client_warmup_fails_when_native_probe_sends_different_model():
+    client = AIStudioClient(port=1)
+    original_session = client._session
+    try:
+        session = NativeProbeWarmupSession([(200, b"ok", "models/gemini-3-flash-preview")])
+        capture_service = WarmupCaptureService()
+        client._session = session
+        client._capture_service = capture_service
+        client._replay_service = WarmupReplayService()
+
+        with pytest.raises(AuthError, match="instead of models/gemini-3.5-flash"):
+            asyncio.run(client.warmup())
+
+        assert session.ensure_context_calls == []
+        assert capture_service.warmup_calls == []
+    finally:
+        client._session = None
+        if original_session is not None:
+            original_session._executor.shutdown(wait=False)
+
+
+def test_client_warmup_expands_startup_timeouts_from_runtime_config(monkeypatch):
+    monkeypatch.setattr(settings, "timeout_capture", 90)
+    monkeypatch.setattr(settings, "timeout_replay", 180)
+    monkeypatch.setenv("AISTUDIO_TIMEOUT_REPLAY", "180")
+    client = AIStudioClient()
+    original_session = client._session
+    session = WarmupSession()
+    capture_service = WarmupCaptureService()
+    try:
+        client._session = session
+        client._capture_service = capture_service
+        replay_service = WarmupReplayService()
+        client._replay_service = replay_service
+
+        asyncio.run(client.warmup())
+
+        assert session.ensure_context_calls == [{"navigation_timeout_ms": 90000, "chat_ready_timeout_ms": 90000}]
+        assert capture_service.warmup_calls == [
+            {
+                "prompt": "1",
+                "model": DEFAULT_WARMUP_TEXT_MODEL,
+                "rewrite_body": False,
+                "retry_template_capture": False,
+                "navigation_timeout_ms": 90000,
+                "chat_ready_timeout_ms": 90000,
+                "botguard_timeout_ms": 90000,
+                "template_capture_timeout_ms": 90000,
+                "template_recovery_attempts": 1,
+            }
+        ]
+        assert replay_service.calls[0]["timeout"] == 180
     finally:
         if original_session is not None:
             original_session._executor.shutdown(wait=False)
@@ -241,6 +445,34 @@ def test_client_warmup_fails_hard_when_generate_content_probe_is_forbidden():
 
         with pytest.raises(AuthError, match="GenerateContent permission check failed"):
             asyncio.run(client.warmup())
+    finally:
+        client._session = None
+        if original_session is not None:
+            original_session._executor.shutdown(wait=False)
+
+
+def test_client_warmup_retries_next_authuser_route_after_forbidden_probe():
+    client = AIStudioClient(port=1)
+    original_session = client._session
+    try:
+        session = FailoverWarmupSession()
+        capture_service = WarmupCaptureService()
+        replay_service = SequenceWarmupReplayService(
+            [
+                (403, b'[[null,[7,"The caller does not have permission"]]]'),
+                (200, b"ok"),
+            ]
+        )
+        client._session = session
+        client._capture_service = capture_service
+        client._replay_service = replay_service
+
+        asyncio.run(client.warmup())
+
+        assert len(session.ensure_context_calls) == 2
+        assert session.advance_calls == 1
+        assert len(capture_service.warmup_calls) == 2
+        assert len(replay_service.calls) == 2
     finally:
         client._session = None
         if original_session is not None:

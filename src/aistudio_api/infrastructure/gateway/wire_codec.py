@@ -17,15 +17,23 @@ TOOLS_TEMPLATES = {
     "google_search": [None, None, None, [None, [[]]]],
 }
 
-AI_STUDIO_WIRE_MODEL_ALIASES = {
-    "gemini-3.5-flash": "models/gemini-3-flash-preview",
-    "models/gemini-3.5-flash": "models/gemini-3-flash-preview",
-}
+AI_STUDIO_WIRE_MODEL_ALIASES = {}
 
 
 def resolve_aistudio_wire_model(model: str) -> str:
     normalized = (model or "").strip()
     return AI_STUDIO_WIRE_MODEL_ALIASES.get(normalized.lower(), normalized)
+
+
+def replace_body_model(original_body: str, model: str = DEFAULT_TEXT_MODEL) -> str:
+    body = json.loads(original_body)
+    if not isinstance(body, list) or not body:
+        raise ValueError("AI Studio request body must be a non-empty wire array")
+    wire_model = resolve_aistudio_wire_model(model)
+    if not wire_model.startswith("models/"):
+        wire_model = f"models/{wire_model}"
+    body[AistudioWireCodec.MODEL_INDEX] = wire_model
+    return json.dumps(body, separators=(",", ":"), ensure_ascii=False)
 
 
 def _encode_image(path: str) -> tuple[str, str]:

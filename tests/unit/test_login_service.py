@@ -1,21 +1,23 @@
 import asyncio
+import json
 import sys
 from types import SimpleNamespace
 
 from aistudio_api.infrastructure.account import login_service as login_module
 from aistudio_api.infrastructure.account.account_store import AccountStore
-from aistudio_api.infrastructure.account.login_service import LOGIN_IDENTITY_ERROR, LoginService, LoginSession, LoginStatus
+from aistudio_api.infrastructure.account.login_service import LOGIN_AI_STUDIO_STATE_ERROR, LOGIN_IDENTITY_ERROR, LoginService, LoginSession, LoginStatus
 
 
-def storage_state(email=None):
+def storage_state(email=None, indexed_db=False):
     origins = []
     if email:
-        origins = [
-            {
-                "origin": "https://aistudio.google.com",
-                "localStorage": [{"name": "account_email", "value": email}],
-            }
-        ]
+        origin = {
+            "origin": "https://aistudio.google.com",
+            "localStorage": [{"name": "account_email", "value": email}],
+        }
+        if indexed_db:
+            origin["indexedDB"] = [{"name": "firebaseLocalStorageDb", "version": 1, "stores": []}]
+        origins = [origin]
     return {
         "cookies": [{"name": "sid", "value": "1", "domain": ".google.com", "path": "/"}],
         "origins": origins,
@@ -56,7 +58,7 @@ class FakePage:
 class FakeContext:
     def __init__(self, page, state):
         self.page = page
-        self.state = state
+        self.states = list(state) if isinstance(state, list) else [state]
         self.storage_state_kwargs = []
 
     async def new_page(self):
@@ -64,7 +66,9 @@ class FakeContext:
 
     async def storage_state(self, **kwargs):
         self.storage_state_kwargs.append(kwargs)
-        return self.state
+        if len(self.states) > 1:
+            return self.states.pop(0)
+        return self.states[0]
 
 
 class FakeBrowser:
@@ -145,7 +149,7 @@ def test_login_worker_saves_verified_identity_without_immediate_activation(tmp_p
     session_id = "login_verified"
     service._sessions[session_id] = LoginSession(session_id=session_id)
     store = AccountStore(accounts_dir=tmp_path)
-    context = install_browser_fakes(monkeypatch, FakePage(email="user@example.com"), storage_state())
+    context = install_browser_fakes(monkeypatch, FakePage(email="user@example.com"), storage_state(email="user@example.com"))
 
     run_login_worker(service, session_id, store)
 
@@ -158,3 +162,42 @@ def test_login_worker_saves_verified_identity_without_immediate_activation(tmp_p
     assert account.email == "user@example.com"
     assert store.get_active_account() is None
     assert context.storage_state_kwargs == [{"indexed_db": True}]
+
+
+def test_login_worker_waits_for_aistudio_origin_storage_before_saving(tmp_path, monkeypatch):
+    service = LoginService(aistudio_state_wait_seconds=2)
+    session_id = "login_waits_for_state"
+    service._sessions[session_id] = LoginSession(session_id=session_id)
+    store = AccountStore(accounts_dir=tmp_path)
+    context = install_browser_fakes(
+        monkeypatch,
+        FakePage(email="user@example.com"),
+        [storage_state(), storage_state(email="user@example.com")],
+    )
+
+    run_login_worker(service, session_id, store)
+
+    session = service.get_status(session_id)
+    assert session.status == LoginStatus.COMPLETED
+    assert session.account_id is not None
+    saved = store.validate_generate_ready_storage_state(
+        json.loads((tmp_path / session.account_id / "auth.json").read_text(encoding="utf-8"))
+    )
+    assert saved == "user@example.com"
+    assert len(context.storage_state_kwargs) == 2
+
+
+def test_login_worker_rejects_cookie_only_aistudio_state(tmp_path, monkeypatch):
+    service = LoginService(aistudio_state_wait_seconds=1)
+    session_id = "login_cookie_only"
+    service._sessions[session_id] = LoginSession(session_id=session_id)
+    store = AccountStore(accounts_dir=tmp_path)
+    install_browser_fakes(monkeypatch, FakePage(email="user@example.com"), storage_state())
+
+    run_login_worker(service, session_id, store)
+
+    session = service.get_status(session_id)
+    assert session.status == LoginStatus.FAILED
+    assert LOGIN_AI_STUDIO_STATE_ERROR in session.error
+    assert session.account_id is None
+    assert store.list_accounts() == []

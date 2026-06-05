@@ -15,6 +15,7 @@ from aistudio_api.infrastructure.browser.camoufox_manager import CamoufoxManager
 logger = logging.getLogger("aistudio.login")
 
 LOGIN_IDENTITY_ERROR = "未能确认 Google 账号身份，请确认登录成功后重试"
+LOGIN_AI_STUDIO_STATE_ERROR = "登录已完成，但未捕获到 AI Studio 浏览器会话状态，请等待 AI Studio 页面完全加载后重新登录"
 EMAIL_DETECTION_SCRIPT = r"""
     () => {
         const values = [];
@@ -61,8 +62,9 @@ class LoginSession:
 class LoginService:
     """Google 账号登录服务。"""
 
-    def __init__(self, port: int = 9223) -> None:
+    def __init__(self, port: int = 9223, aistudio_state_wait_seconds: int = 30) -> None:
         self._port = port
+        self._aistudio_state_wait_seconds = aistudio_state_wait_seconds
         self._sessions: dict[str, LoginSession] = {}
         self._tasks: dict[str, asyncio.Task] = {}
 
@@ -123,6 +125,31 @@ class LoginService:
             return await context.storage_state(indexed_db=True)
         except TypeError:
             return await context.storage_state()
+
+    async def _wait_for_generate_ready_storage_state(
+        self,
+        account_store: Any,
+        page: Any,
+        context: Any,
+    ) -> dict[str, Any]:
+        try:
+            await page.goto("https://aistudio.google.com/", wait_until="domcontentloaded", timeout=30000)
+        except Exception as exc:
+            logger.warning("打开 AI Studio 页面以捕获完整会话状态失败: %s", exc)
+
+        attempts = max(1, int(self._aistudio_state_wait_seconds))
+        last_error: ValueError | None = None
+        for attempt_index in range(attempts):
+            storage_state = await self._storage_state_with_indexed_db(context)
+            try:
+                account_store.validate_generate_ready_storage_state(storage_state)
+                return storage_state
+            except ValueError as exc:
+                last_error = exc
+            if attempt_index < attempts - 1:
+                await asyncio.sleep(1)
+
+        raise ValueError(f"{LOGIN_AI_STUDIO_STATE_ERROR}: {last_error}")
 
     async def _login_worker(
         self,
@@ -206,6 +233,17 @@ class LoginService:
                 session.error = LOGIN_IDENTITY_ERROR
                 logger.warning("登录未确认 Google 账号身份，不保存账号")
                 return
+
+            try:
+                account_store.validate_generate_ready_storage_state(storage_state)
+            except ValueError:
+                try:
+                    storage_state = await self._wait_for_generate_ready_storage_state(account_store, page, context)
+                except ValueError as e:
+                    session.status = LoginStatus.FAILED
+                    session.error = str(e)
+                    logger.warning("登录状态缺少 AI Studio 完整会话，不保存账号: %s", e)
+                    return
 
             # 保存账号
             account_name = name or detected_email or "Google 账号"
