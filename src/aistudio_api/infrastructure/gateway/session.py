@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import json
 import logging
 import os
-import subprocess
-import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -19,10 +16,19 @@ from typing import Any
 from urllib.parse import quote, urlparse
 
 from aistudio_api.config import camoufox_proxy_identity_options, settings
-from aistudio_api.domain.errors import ModelNotFoundError
+from aistudio_api.domain.errors import ModelNotFoundError, RequestError
+from aistudio_api.infrastructure.gateway.native_ui_worker_pool import NativeUiWorkerError, NativeUiWorkerPool
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
 
 log = logging.getLogger("aistudio.session")
+
+
+class _NativeUiReplayUnsupported(RuntimeError):
+    pass
+
+
+def _native_worker_unavailable_error(exc: BaseException) -> RequestError:
+    return RequestError(503, f"native UI worker unavailable: {exc}")
 
 AI_STUDIO_URL = "https://aistudio.google.com/u/2/prompts/new_chat"
 AI_STUDIO_URL_FALLBACK = "https://aistudio.google.com/u/0/prompts/new_chat"
@@ -669,8 +675,14 @@ class BrowserSession:
         self._snap_key: str | None = None
         self._templates: dict[str, dict[str, Any]] = {}
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aistudio-camoufox")
+        self._native_worker_executor = ThreadPoolExecutor(
+            max_workers=max(1, int(getattr(settings, "native_ui_workers_per_account", 3) or 1)),
+            thread_name_prefix="aistudio-native-ui",
+        )
         self._botguard_lock = asyncio.Lock()
         self._snapshot_lock = asyncio.Lock()
+        self._native_worker_pool_lock = threading.Lock()
+        self._native_worker_pool: NativeUiWorkerPool | None = None
         self._preferred_chat_url: str | None = None
         self._last_requested_chat_url: str | None = None
         self._failed_chat_urls: set[str] = set()
@@ -689,7 +701,8 @@ class BrowserSession:
         await self._run_sync(self._switch_auth_sync, auth_file)
 
     async def close(self) -> None:
-        await self._run_sync(self._close_sync)
+        await self._run_sync(self._close_all_sync)
+        self._native_worker_executor.shutdown(wait=False, cancel_futures=True)
 
     def clear_templates(self) -> None:
         self._templates.clear()
@@ -748,10 +761,29 @@ class BrowserSession:
             return await loop.run_in_executor(self._executor, lambda: self._generate_snapshot_sync(contents))
 
     async def send_hooked_request(self, *, body: str, url: str, headers: dict[str, str], timeout_ms: int) -> tuple[int, bytes]:
+        if self._auth_file:
+            try:
+                return await self._send_account_native_generate_content_body_async(body=body, timeout_ms=timeout_ms)
+            except _NativeUiReplayUnsupported as exc:
+                log.info("AI Studio native UI worker replay unsupported before browser replay: %s", exc)
+            except RequestError:
+                raise
+            except NativeUiWorkerError as exc:
+                raise _native_worker_unavailable_error(exc) from exc
+            except Exception as exc:
+                raise _native_worker_unavailable_error(exc) from exc
+            return await self._run_sync(self._send_hooked_request_sync, body, url, headers, timeout_ms, False)
         return await self._run_sync(self._send_hooked_request_sync, body, url, headers, timeout_ms)
 
     async def probe_native_generate_content(self, *, model: str, timeout_ms: int) -> tuple[int, bytes, str]:
         return await self._run_sync(self._probe_native_generate_content_sync, model, timeout_ms)
+
+    async def probe_native_worker_generate_content(self, *, model: str, timeout_ms: int) -> tuple[int, bytes, str]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._native_worker_executor,
+            lambda: self._probe_native_worker_generate_content_sync(model=model, timeout_ms=timeout_ms),
+        )
 
     async def send_streaming_request(self, *, body: str, url: str, headers: dict[str, str], timeout_ms: int):
         """Send a streaming request, yielding ("status", int) and ("chunk", bytes) events."""
@@ -759,10 +791,36 @@ class BrowserSession:
         loop = asyncio.get_running_loop()
         cancel_event = threading.Event()
 
+        if self._auth_file:
+            try:
+                status, raw = await self._send_account_native_generate_content_body_async(body=body, timeout_ms=timeout_ms)
+            except _NativeUiReplayUnsupported as exc:
+                log.info("AI Studio native UI worker replay unsupported before streaming browser replay: %s", exc)
+            except RequestError:
+                raise
+            except NativeUiWorkerError as exc:
+                raise _native_worker_unavailable_error(exc) from exc
+            except Exception as exc:
+                raise _native_worker_unavailable_error(exc) from exc
+            else:
+                yield "status", status
+                if raw:
+                    yield "chunk", raw
+                return
+
         def _stream_worker():
             try:
                 log.debug("[stream] worker started")
-                self._send_streaming_request_sync(body, url, headers, timeout_ms, queue, loop, cancel_event)
+                self._send_streaming_request_sync(
+                    body,
+                    url,
+                    headers,
+                    timeout_ms,
+                    queue,
+                    loop,
+                    cancel_event,
+                    try_native=not bool(self._auth_file),
+                )
                 log.debug("[stream] worker finished")
             except Exception as e:
                 log.debug(f"[stream] worker exception: {e}")
@@ -788,6 +846,19 @@ class BrowserSession:
         async with self._botguard_lock:
             return await loop.run_in_executor(self._executor, lambda: func(*args))
 
+    async def _send_account_native_generate_content_body_async(self, *, body: str, timeout_ms: int) -> tuple[int, bytes]:
+        if not self._auth_file:
+            raise RuntimeError("native UI worker replay requires account auth file")
+        try:
+            model, prompt = self._native_text_replay_payload_from_body(body)
+        except Exception as exc:
+            raise _NativeUiReplayUnsupported(str(exc)) from exc
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._native_worker_executor,
+            lambda: self._send_native_generate_content_worker_pool_sync(model=model, prompt=prompt, timeout_ms=timeout_ms),
+        )
+
     def _get_captured_info(self) -> tuple[str, dict[str, str]]:
         """Get captured URL and headers from template."""
         for tpl in self._templates.values():
@@ -806,6 +877,7 @@ class BrowserSession:
         queue: asyncio.Queue,
         loop: asyncio.AbstractEventLoop,
         cancel_event: threading.Event,
+        try_native: bool = True,
     ):
         """Sync method: triggers AI Studio's native request and forwards the response."""
         import time as _t
@@ -819,6 +891,7 @@ class BrowserSession:
                 url=url,
                 headers=headers,
                 timeout_ms=timeout_ms,
+                try_native=try_native,
             )
             if cancel_event.is_set():
                 return
@@ -870,7 +943,7 @@ class BrowserSession:
             if response_holder:
                 return
             response_url = getattr(response, "url", "") or ""
-            if "CountTokens" in response_url:
+            if "CountTokens" in response_url or "PerUserQuota" in response_url:
                 return
             response_request = getattr(response, "request", None)
             response_request_body = getattr(response_request, "post_data", None)
@@ -927,14 +1000,33 @@ class BrowserSession:
             except Exception:
                 pass
 
-    def _send_generate_content_with_fallback_sync(self, *, body: str, url: str, headers: dict[str, str], timeout_ms: int) -> tuple[int, bytes]:
-        try:
-            native_status, native_raw = self._send_native_generate_content_body_sync(body=body, timeout_ms=timeout_ms)
-        except Exception as exc:
-            log.info("AI Studio native UI replay unavailable before browser replay: %s", exc)
-        else:
-            log.info("AI Studio native UI replay completed before browser replay: native_status=%s", native_status)
-            return native_status, native_raw
+    def _send_generate_content_with_fallback_sync(
+        self,
+        *,
+        body: str,
+        url: str,
+        headers: dict[str, str],
+        timeout_ms: int,
+        try_native: bool = True,
+    ) -> tuple[int, bytes]:
+        if try_native:
+            try:
+                native_status, native_raw = self._send_native_generate_content_body_sync(body=body, timeout_ms=timeout_ms)
+            except _NativeUiReplayUnsupported as exc:
+                log.info("AI Studio native UI replay unsupported before browser replay: %s", exc)
+            except RequestError:
+                raise
+            except NativeUiWorkerError as exc:
+                if self._auth_file:
+                    raise _native_worker_unavailable_error(exc) from exc
+                log.info("AI Studio native UI replay unavailable before browser replay: %s", exc)
+            except Exception as exc:
+                if self._auth_file:
+                    raise _native_worker_unavailable_error(exc) from exc
+                log.info("AI Studio native UI replay unavailable before browser replay: %s", exc)
+            else:
+                log.info("AI Studio native UI replay completed before browser replay: native_status=%s", native_status)
+                return native_status, native_raw
 
         status, raw = self._browser_fetch_generate_content_sync(
             body=body,
@@ -995,59 +1087,43 @@ class BrowserSession:
         return replay_headers
 
     def _send_native_generate_content_body_sync(self, *, body: str, timeout_ms: int) -> tuple[int, bytes]:
-        model, prompt = self._native_text_replay_payload_from_body(body)
+        try:
+            model, prompt = self._native_text_replay_payload_from_body(body)
+        except Exception as exc:
+            raise _NativeUiReplayUnsupported(str(exc)) from exc
         if self._auth_file:
-            return self._send_native_generate_content_subprocess_sync(model=model, prompt=prompt, timeout_ms=timeout_ms)
+            return self._send_native_generate_content_worker_pool_sync(model=model, prompt=prompt, timeout_ms=timeout_ms)
         return self._send_native_generate_content_prompt_sync(model=model, prompt=prompt, timeout_ms=timeout_ms)
 
-    def _send_native_generate_content_subprocess_sync(self, *, model: str, prompt: str, timeout_ms: int) -> tuple[int, bytes]:
-        payload = {
-            "auth_file": self._auth_file,
-            "model": model,
-            "prompt": prompt,
-            "timeout_ms": timeout_ms,
-        }
-        command = [sys.executable, "-m", "aistudio_api.infrastructure.gateway.native_ui_sender"]
-        timeout_seconds = max(60, int(timeout_ms / 1000) + 90)
-        completed = subprocess.run(
-            command,
-            input=json.dumps(payload, ensure_ascii=False),
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds,
-            env=os.environ.copy(),
-        )
-        result = self._parse_native_ui_sender_output(completed.stdout)
-        if completed.returncode != 0 or not result.get("ok"):
-            stderr = " ".join(str(completed.stderr or "").split())[:300]
-            error = str(result.get("error") or "native UI sender failed")[:300]
-            raise RuntimeError(f"native UI sender subprocess failed: {error}; stderr={stderr}")
-        try:
-            status = int(result.get("status") or 0)
-            raw = base64.b64decode(str(result.get("body_b64") or ""))
-        except Exception as exc:
-            raise RuntimeError(f"native UI sender returned malformed response: {result!r}") from exc
-        log.info(
-            "AI Studio native UI subprocess replay matched response: status=%s, wire_model=%s, body_size=%s, url_path=%s",
-            status,
-            result.get("wire_model") or "",
-            result.get("body_size") or len(raw),
-            result.get("url_path") or "",
-        )
-        return status, raw
+    def _send_native_generate_content_worker_pool_sync(self, *, model: str, prompt: str, timeout_ms: int) -> tuple[int, bytes]:
+        pool = self._native_worker_pool_sync()
+        return pool.send(model=model, prompt=prompt, timeout_ms=timeout_ms)
 
-    def _parse_native_ui_sender_output(self, stdout: str) -> dict[str, Any]:
-        for line in reversed(str(stdout or "").splitlines()):
-            candidate = line.strip()
-            if not candidate.startswith("{"):
-                continue
-            try:
-                parsed = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict):
-                return parsed
-        return {"ok": False, "error": "native UI sender produced no JSON result"}
+    def _probe_native_worker_generate_content_sync(self, *, model: str, timeout_ms: int) -> tuple[int, bytes, str]:
+        pool = self._native_worker_pool_sync()
+        status, raw, metadata = pool.send_with_metadata(model=model, prompt="1", timeout_ms=timeout_ms)
+        return status, raw, str(metadata.get("wire_model") or "")
+
+    def _native_worker_pool_sync(self) -> NativeUiWorkerPool:
+        auth_file = str(self._auth_file or "")
+        if not auth_file:
+            raise RuntimeError("native UI worker pool requires account auth file")
+        worker_count = max(1, int(getattr(settings, "native_ui_workers_per_account", 3) or 1))
+        with self._native_worker_pool_lock:
+            pool = self._native_worker_pool
+            if pool is not None and pool.auth_file == auth_file and pool.worker_count == worker_count:
+                return pool
+            if pool is not None:
+                pool.close()
+            self._native_worker_pool = NativeUiWorkerPool(auth_file=auth_file, worker_count=worker_count)
+            return self._native_worker_pool
+
+    def _close_native_worker_pool_sync(self) -> None:
+        with self._native_worker_pool_lock:
+            pool = self._native_worker_pool
+            self._native_worker_pool = None
+        if pool is not None:
+            pool.close()
 
     def _native_text_replay_payload_from_body(self, body: str) -> tuple[str, str]:
         from aistudio_api.infrastructure.gateway.wire_codec import AistudioWireCodec
@@ -1140,7 +1216,7 @@ class BrowserSession:
             if response_holder:
                 return
             response_url = getattr(response, "url", "") or ""
-            if "CountTokens" in response_url:
+            if "CountTokens" in response_url or "PerUserQuota" in response_url:
                 return
             try:
                 request_body = response.request.post_data
@@ -1418,6 +1494,7 @@ class BrowserSession:
                     pass
 
     def _switch_auth_sync(self, auth_file: str | None) -> None:
+        self._close_native_worker_pool_sync()
         self._auth_file = auth_file
         self._preferred_chat_url = None
         self._last_requested_chat_url = None
@@ -2104,7 +2181,14 @@ mw:((hash) => {
             raise RuntimeError(f"image upload incomplete: expected={len(image_paths)} uploaded={len(uploaded_ids)}")
         return uploaded_ids
 
-    def _send_hooked_request_sync(self, body: str, url: str, headers: dict[str, str], timeout_ms: int) -> tuple[int, bytes]:
+    def _send_hooked_request_sync(
+        self,
+        body: str,
+        url: str,
+        headers: dict[str, str],
+        timeout_ms: int,
+        try_native: bool = True,
+    ) -> tuple[int, bytes]:
         import time as _t
         _t0 = _t.time()
         status, raw = self._send_generate_content_with_fallback_sync(
@@ -2112,6 +2196,7 @@ mw:((hash) => {
             url=url,
             headers=headers,
             timeout_ms=timeout_ms,
+            try_native=try_native,
         )
         log.debug("[timing] browser fetch replay done in %.1fs, status=%s", _t.time() - _t0, status)
         return status, raw
@@ -2723,3 +2808,7 @@ mw:((hash) => {
         self._cf = None
         self._snap_key = None
         self.clear_templates()
+
+    def _close_all_sync(self) -> None:
+        self._close_sync()
+        self._close_native_worker_pool_sync()

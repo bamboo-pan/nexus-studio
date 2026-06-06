@@ -311,9 +311,12 @@ async def lifespan(app: FastAPI):
                     if account_client is None:
                         runtime_state.warmup_failed_accounts = [*runtime_state.warmup_failed_accounts, account_id]
                         continue
-                    await _warmup_with_retries(account_client.warmup, label=f"Account browser {account_id}")
+                    warmup_account = getattr(account_client, "warmup_account_text_native", None)
+                    if not callable(warmup_account):
+                        warmup_account = account_client.warmup
+                    await _warmup_with_retries(warmup_account, label=f"Account native text {account_id}")
                     runtime_state.warmup_completed_accounts = [*runtime_state.warmup_completed_accounts, account_id]
-                    logger.info("Account browser warmup completed: account=%s", account_id)
+                    logger.info("Account native text warmup completed: account=%s", account_id)
                 except asyncio.CancelledError:
                     runtime_state.warmup_status = "cancelled"
                     raise

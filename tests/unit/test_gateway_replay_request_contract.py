@@ -1,6 +1,9 @@
 import asyncio
 import json
 
+import pytest
+
+from aistudio_api.domain.errors import RequestError
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest
 from aistudio_api.infrastructure.gateway.client import image_replay_model_id
 from aistudio_api.infrastructure.gateway.replay import RequestReplayService
@@ -47,6 +50,11 @@ class FakeStreamingSession:
         yield "status", 200
 
 
+class FakeControlledErrorReplaySession:
+    async def send_hooked_request(self, *, body, url, headers, timeout_ms):
+        raise RequestError(503, "native UI worker unavailable: model picker not ready")
+
+
 def test_browser_replay_uses_captured_request_url_and_headers_without_session_template():
     captured = _captured_request()
     session = FakeReplaySession()
@@ -67,6 +75,16 @@ def test_browser_replay_uses_captured_request_url_and_headers_without_session_te
             "timeout_ms": 7000,
         }
     ]
+
+
+def test_browser_replay_propagates_controlled_request_error():
+    replay = RequestReplayService(session=FakeControlledErrorReplaySession())
+
+    with pytest.raises(RequestError) as exc_info:
+        asyncio.run(replay.replay(_captured_request(), body="rewritten-body", timeout=7))
+
+    assert exc_info.value.status == 503
+    assert "native UI worker unavailable" in exc_info.value.message
 
 
 def test_streaming_replay_uses_captured_request_url_and_headers_without_session_template():
