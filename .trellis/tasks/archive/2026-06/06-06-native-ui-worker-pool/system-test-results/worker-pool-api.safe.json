@@ -1,0 +1,20 @@
+[
+  {
+    "sequence": 1,
+    "status_code": 200,
+    "content_prefix": "nexus-worker-pool-api-ok",
+    "error": null
+  },
+  {
+    "sequence": 2,
+    "status_code": 200,
+    "content_prefix": "nexus-worker-pool-api-ok",
+    "error": null
+  },
+  {
+    "sequence": 3,
+    "status_code": 200,
+    "content_prefix": "nexus-worker-pool-api-ok",
+    "error": null
+  }
+]

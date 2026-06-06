@@ -1,15 +1,15 @@
-import base64
 import asyncio
 import json
-import subprocess
+import threading
 
 import pytest
 
 import aistudio_api.infrastructure.gateway.session as session_module
 from aistudio_api.config import settings
-from aistudio_api.domain.errors import ModelNotFoundError
+from aistudio_api.domain.errors import ModelNotFoundError, RequestError
 from aistudio_api.infrastructure.account import tier_detector
 from aistudio_api.infrastructure.account.tier_detector import AccountTier, TierResult
+from aistudio_api.infrastructure.gateway.native_ui_worker_pool import NativeUiWorkerProcessError
 from aistudio_api.infrastructure.gateway.session import (
     AI_STUDIO_URL,
     AI_STUDIO_URL_FALLBACK,
@@ -1023,41 +1023,30 @@ def test_send_hooked_request_native_ui_fallback_uses_unhooked_isolated_context()
     assert probe_page.filled_texts == ["Reply with exactly: nexus-permission-api-ok"]
 
 
-def test_send_native_generate_content_uses_subprocess_when_auth_file_available(tmp_path, monkeypatch):
+def test_send_native_generate_content_uses_worker_pool_when_auth_file_available(tmp_path, monkeypatch):
     auth_file = tmp_path / "auth.json"
     auth_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(settings, "native_ui_workers_per_account", 2)
+    pools = []
+
+    class FakeNativeUiWorkerPool:
+        def __init__(self, *, auth_file, worker_count):
+            self.auth_file = auth_file
+            self.worker_count = worker_count
+            self.calls = []
+            self.closed = False
+            pools.append(self)
+
+        def send(self, *, model, prompt, timeout_ms):
+            self.calls.append({"model": model, "prompt": prompt, "timeout_ms": timeout_ms})
+            return 200, f"worker-ok-{len(self.calls)}".encode("utf-8")
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(session_module, "NativeUiWorkerPool", FakeNativeUiWorkerPool)
     session = BrowserSession(port=0)
     session._auth_file = str(auth_file)
-    calls: list[dict[str, object]] = []
-
-    def fake_run(command, *, input, text, capture_output, timeout, env):
-        payload = json.loads(input)
-        calls.append(
-            {
-                "command": command,
-                "payload": payload,
-                "text": text,
-                "capture_output": capture_output,
-                "timeout": timeout,
-                "env": env,
-            }
-        )
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout=json.dumps(
-                {
-                    "ok": True,
-                    "status": 200,
-                    "body_b64": base64.b64encode(b"subprocess-ok").decode("ascii"),
-                    "wire_model": "models/gemini-3.5-flash",
-                    "url_path": "/u/0/prompts/new_chat",
-                }
-            ),
-            stderr="",
-        )
-
-    monkeypatch.setattr(session_module.subprocess, "run", fake_run)
     body = json.dumps(
         [
             "models/gemini-3.5-flash",
@@ -1070,18 +1059,284 @@ def test_send_native_generate_content_uses_subprocess_when_auth_file_available(t
     )
 
     status, raw = session._send_native_generate_content_body_sync(body=body, timeout_ms=2500)
+    status2, raw2 = session._send_native_generate_content_body_sync(body=body, timeout_ms=3000)
 
     assert status == 200
-    assert raw == b"subprocess-ok"
-    assert calls[0]["command"][-2:] == ["-m", "aistudio_api.infrastructure.gateway.native_ui_sender"]
-    assert calls[0]["payload"] == {
-        "auth_file": str(auth_file),
-        "model": "models/gemini-3.5-flash",
-        "prompt": "Reply with exactly: nexus-permission-api-ok",
-        "timeout_ms": 2500,
-    }
-    assert calls[0]["text"] is True
-    assert calls[0]["capture_output"] is True
+    assert raw == b"worker-ok-1"
+    assert status2 == 200
+    assert raw2 == b"worker-ok-2"
+    assert len(pools) == 1
+    assert pools[0].auth_file == str(auth_file)
+    assert pools[0].worker_count == 2
+    assert pools[0].calls == [
+        {
+            "model": "models/gemini-3.5-flash",
+            "prompt": "Reply with exactly: nexus-permission-api-ok",
+            "timeout_ms": 2500,
+        },
+        {
+            "model": "models/gemini-3.5-flash",
+            "prompt": "Reply with exactly: nexus-permission-api-ok",
+            "timeout_ms": 3000,
+        },
+    ]
+
+
+def test_switch_auth_closes_native_worker_pool(tmp_path, monkeypatch):
+    first_auth = tmp_path / "first.json"
+    second_auth = tmp_path / "second.json"
+    first_auth.write_text("{}", encoding="utf-8")
+    second_auth.write_text("{}", encoding="utf-8")
+    pools = []
+
+    class FakeNativeUiWorkerPool:
+        def __init__(self, *, auth_file, worker_count):
+            self.auth_file = auth_file
+            self.worker_count = worker_count
+            self.closed = False
+            pools.append(self)
+
+        def send(self, *, model, prompt, timeout_ms):
+            return 200, b"ok"
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(session_module, "NativeUiWorkerPool", FakeNativeUiWorkerPool)
+    session = BrowserSession(port=0)
+    session._auth_file = str(first_auth)
+
+    first_pool = session._native_worker_pool_sync()
+    session._switch_auth_sync(str(second_auth))
+    second_pool = session._native_worker_pool_sync()
+
+    assert first_pool.closed is True
+    assert second_pool is not first_pool
+    assert second_pool.auth_file == str(second_auth)
+
+
+def test_account_send_hooked_request_uses_native_worker_executor(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    session = BrowserSession(port=0)
+    session._auth_file = str(auth_file)
+    calls = []
+
+    def fake_worker_send(*, model, prompt, timeout_ms):
+        calls.append({"thread": threading.current_thread().name, "model": model, "prompt": prompt, "timeout_ms": timeout_ms})
+        return 200, b"async-worker-ok"
+
+    def fail_browser_replay(*args, **kwargs):
+        raise AssertionError("browser replay should not run when native worker succeeds")
+
+    monkeypatch.setattr(session, "_send_native_generate_content_worker_pool_sync", fake_worker_send)
+    monkeypatch.setattr(session, "_browser_fetch_generate_content_sync", fail_browser_replay)
+    body = json.dumps(
+        [
+            "models/gemini-3.5-flash",
+            [[[[None, "Reply with exactly: nexus-permission-api-ok"]], "user"]],
+            None,
+            [],
+            "snapshot",
+        ],
+        ensure_ascii=False,
+    )
+
+    async def run_request():
+        try:
+            return await session.send_hooked_request(
+                body=body,
+                url="https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent",
+                headers={"content-type": "application/json+protobuf"},
+                timeout_ms=2500,
+            )
+        finally:
+            await session.close()
+
+    status, raw = asyncio.run(run_request())
+
+    assert status == 200
+    assert raw == b"async-worker-ok"
+    assert calls == [
+        {
+            "thread": calls[0]["thread"],
+            "model": "models/gemini-3.5-flash",
+            "prompt": "Reply with exactly: nexus-permission-api-ok",
+            "timeout_ms": 2500,
+        }
+    ]
+    assert str(calls[0]["thread"]).startswith("aistudio-native-ui")
+
+
+def test_account_streaming_request_uses_native_worker_executor(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    session = BrowserSession(port=0)
+    session._auth_file = str(auth_file)
+    calls = []
+
+    def fake_worker_send(*, model, prompt, timeout_ms):
+        calls.append({"model": model, "prompt": prompt, "timeout_ms": timeout_ms})
+        return 200, b'[[[[[[[[null,"hello"]]]]]]]]'
+
+    monkeypatch.setattr(session, "_send_native_generate_content_worker_pool_sync", fake_worker_send)
+    body = json.dumps(
+        [
+            "models/gemini-3.5-flash",
+            [[[[None, "Reply with exactly: nexus-permission-api-ok"]], "user"]],
+            None,
+            [],
+            "snapshot",
+        ],
+        ensure_ascii=False,
+    )
+
+    async def collect():
+        try:
+            events = []
+            async for event in session.send_streaming_request(
+                body=body,
+                url="https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent",
+                headers={"content-type": "application/json+protobuf"},
+                timeout_ms=2500,
+            ):
+                events.append(event)
+            return events
+        finally:
+            await session.close()
+
+    events = asyncio.run(collect())
+
+    assert events == [("status", 200), ("chunk", b'[[[[[[[[null,"hello"]]]]]]]]')]
+    assert calls == [
+        {
+            "model": "models/gemini-3.5-flash",
+            "prompt": "Reply with exactly: nexus-permission-api-ok",
+            "timeout_ms": 2500,
+        }
+    ]
+
+
+def test_account_send_hooked_request_worker_failure_does_not_use_browser_replay(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    session = BrowserSession(port=0)
+    session._auth_file = str(auth_file)
+
+    def fail_worker_send(*, model, prompt, timeout_ms):
+        raise NativeUiWorkerProcessError("model picker not ready")
+
+    def fail_browser_replay(*args, **kwargs):
+        raise AssertionError("browser replay should not run when account native worker fails")
+
+    monkeypatch.setattr(session, "_send_native_generate_content_worker_pool_sync", fail_worker_send)
+    monkeypatch.setattr(session, "_send_hooked_request_sync", fail_browser_replay)
+    body = json.dumps(
+        [
+            "models/gemini-3.5-flash",
+            [[[[None, "Reply with exactly: nexus-permission-api-ok"]], "user"]],
+            None,
+            [],
+            "snapshot",
+        ],
+        ensure_ascii=False,
+    )
+
+    async def run_request():
+        try:
+            return await session.send_hooked_request(
+                body=body,
+                url="https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent",
+                headers={"content-type": "application/json+protobuf"},
+                timeout_ms=2500,
+            )
+        finally:
+            await session.close()
+
+    with pytest.raises(RequestError) as exc_info:
+        asyncio.run(run_request())
+
+    assert exc_info.value.status == 503
+    assert "native UI worker unavailable" in exc_info.value.message
+
+
+def test_account_streaming_request_worker_failure_does_not_use_browser_replay(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    session = BrowserSession(port=0)
+    session._auth_file = str(auth_file)
+
+    def fail_worker_send(*, model, prompt, timeout_ms):
+        raise NativeUiWorkerProcessError("model picker not ready")
+
+    def fail_stream_replay(*args, **kwargs):
+        raise AssertionError("browser streaming replay should not run when account native worker fails")
+
+    monkeypatch.setattr(session, "_send_native_generate_content_worker_pool_sync", fail_worker_send)
+    monkeypatch.setattr(session, "_send_streaming_request_sync", fail_stream_replay)
+    body = json.dumps(
+        [
+            "models/gemini-3.5-flash",
+            [[[[None, "Reply with exactly: nexus-permission-ui-ok"]], "user"]],
+            None,
+            [],
+            "snapshot",
+        ],
+        ensure_ascii=False,
+    )
+
+    async def collect():
+        try:
+            events = []
+            async for event in session.send_streaming_request(
+                body=body,
+                url="https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent",
+                headers={"content-type": "application/json+protobuf"},
+                timeout_ms=2500,
+            ):
+                events.append(event)
+            return events
+        finally:
+            await session.close()
+
+    with pytest.raises(RequestError) as exc_info:
+        asyncio.run(collect())
+
+    assert exc_info.value.status == 503
+    assert "native UI worker unavailable" in exc_info.value.message
+
+
+def test_account_send_hooked_request_falls_back_when_body_is_not_native_text(tmp_path):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    page = FakePage(url=AI_STUDIO_URL, has_default_makersuite=True, has_textarea=True)
+    page.browser_fetch_response_body = b"compat-fallback-ok"
+    session = BrowserSessionForTest(page)
+    session._auth_file = str(auth_file)
+
+    async def run_request():
+        try:
+            return await session.send_hooked_request(
+                body="not-a-wire-body",
+                url="https://aistudio.google.com/_/BardChatUi/data/batchexecute/GenerateContent",
+                headers={"content-type": "application/json"},
+                timeout_ms=1000,
+            )
+        finally:
+            await session.close()
+
+    status, raw = asyncio.run(run_request())
+
+    assert status == 200
+    assert raw == b"compat-fallback-ok"
+    assert page.browser_fetch_requests == [
+        {
+            "url": "https://aistudio.google.com/_/BardChatUi/data/batchexecute/GenerateContent",
+            "headers": {"content-type": "application/json"},
+            "body": "not-a-wire-body",
+            "timeoutMs": 1000,
+        }
+    ]
 
 
 def test_send_hooked_request_reports_browser_fetch_error():

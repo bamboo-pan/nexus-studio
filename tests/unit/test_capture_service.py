@@ -96,6 +96,21 @@ class NativeProbeWarmupSession(WarmupSession):
         return result
 
 
+class NativeWorkerWarmupSession(WarmupSession):
+    def __init__(self, results=None, events=None):
+        super().__init__(events=events)
+        self.worker_probe_calls = []
+        self.results = list(results or [(200, b"ok", f"models/{DEFAULT_WARMUP_TEXT_MODEL}")])
+
+    async def probe_native_worker_generate_content(self, *, model: str, timeout_ms: int):
+        self.events.append("worker_probe")
+        self.worker_probe_calls.append({"model": model, "timeout_ms": timeout_ms})
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
 class FailoverWarmupSession(WarmupSession):
     async def advance_chat_route_after_auth_failure(self):
         self.advance_calls += 1
@@ -296,6 +311,54 @@ def test_client_warmup_prefers_native_generate_content_probe_when_available():
         assert events == ["probe", "ensure", "capture"]
 
     finally:
+        if original_session is not None:
+            original_session._executor.shutdown(wait=False)
+
+
+def test_client_account_text_warmup_uses_native_worker_pool_without_template_capture():
+    client = AIStudioClient(port=1)
+    original_session = client._session
+    events = []
+    session = NativeWorkerWarmupSession(events=events)
+    capture_service = WarmupCaptureService(events=events)
+    try:
+        client._session = session
+        client._capture_service = capture_service
+        replay_service = WarmupReplayService()
+        client._replay_service = replay_service
+
+        asyncio.run(client.warmup_account_text_native())
+
+        assert session.worker_probe_calls == [{"model": DEFAULT_WARMUP_TEXT_MODEL, "timeout_ms": 30000}]
+        assert session.ensure_context_calls == []
+        assert capture_service.warmup_calls == []
+        assert replay_service.calls == []
+        assert events == ["worker_probe"]
+    finally:
+        client._session = None
+        if original_session is not None:
+            original_session._executor.shutdown(wait=False)
+
+
+def test_client_account_text_warmup_keeps_native_worker_forbidden_as_auth_failure():
+    client = AIStudioClient(port=1)
+    original_session = client._session
+    session = NativeWorkerWarmupSession(
+        [(403, b'[[null,[7,"The caller does not have permission"]]]', f"models/{DEFAULT_WARMUP_TEXT_MODEL}")]
+    )
+    capture_service = WarmupCaptureService()
+    try:
+        client._session = session
+        client._capture_service = capture_service
+        client._replay_service = WarmupReplayService()
+
+        with pytest.raises(AuthError, match="GenerateContent permission check failed"):
+            asyncio.run(client.warmup_account_text_native())
+
+        assert session.worker_probe_calls == [{"model": DEFAULT_WARMUP_TEXT_MODEL, "timeout_ms": 30000}]
+        assert capture_service.warmup_calls == []
+    finally:
+        client._session = None
         if original_session is not None:
             original_session._executor.shutdown(wait=False)
 

@@ -1,0 +1,56 @@
+{
+  "configured_workers": 3,
+  "pool_ready": [
+    {
+      "auth_hash": "c0c7f3f4268c",
+      "worker_count": 3
+    },
+    {
+      "auth_hash": "72e0ac6e7bdd",
+      "worker_count": 3
+    }
+  ],
+  "start_count": 5,
+  "started_workers": [
+    0,
+    1,
+    2
+  ],
+  "matched_count": 7,
+  "matches_by_hash": {
+    "c0c7f3f4268c": [
+      {
+        "worker": 0,
+        "status": 200
+      },
+      {
+        "worker": 1,
+        "status": 200
+      }
+    ],
+    "72e0ac6e7bdd": [
+      {
+        "worker": 2,
+        "status": 200
+      },
+      {
+        "worker": 0,
+        "status": 200
+      },
+      {
+        "worker": 2,
+        "status": 200
+      },
+      {
+        "worker": 0,
+        "status": 200
+      },
+      {
+        "worker": 2,
+        "status": 200
+      }
+    ]
+  },
+  "restart_count": 0,
+  "fallback_count": 0
+}

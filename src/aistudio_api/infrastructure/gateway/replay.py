@@ -6,6 +6,7 @@ import logging
 import time
 
 from aistudio_api.config import settings
+from aistudio_api.domain.errors import RequestError
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest
 from aistudio_api.infrastructure.gateway.session import BrowserSession
 from aistudio_api.infrastructure.request_logs import RequestLogStore
@@ -73,6 +74,12 @@ class RequestReplayService:
                         elapsed_ms=elapsed_ms,
                     )
                     return resp.status, raw
+        except RequestError as exc:
+            logger.error("Replay controlled error: %s", exc)
+            raw = str(exc).encode()
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            self._record_response(captured=captured, entry=entry, kind=kind, model=model, status=exc.status, raw=raw, transport=transport, elapsed_ms=elapsed_ms)
+            raise
         except Exception as exc:
             logger.error("Replay error: %s", exc)
             raw = str(exc).encode()

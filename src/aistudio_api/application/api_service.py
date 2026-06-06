@@ -226,6 +226,10 @@ def _gemini_stream_error_payload(exc: BaseException) -> dict[str, Any]:
     return {"error": {"code": 500, "message": message, "status": "INTERNAL"}}
 
 
+def _is_native_worker_unavailable(exc: RequestError) -> bool:
+    return exc.status == 503 and "native UI worker unavailable" in (exc.message or "")
+
+
 async def _request_disconnected(request: Request | None) -> bool:
     if request is None:
         return False
@@ -2718,7 +2722,19 @@ async def handle_chat(req: ChatRequest, client: AIStudioClient, request: Request
                     raise _upstream_exception(last_error) from exc
                 raise
             except RequestError as exc:
-                _record_request_result(model, "errors", account_id=account_context.account_id if account_context is not None else None)
+                failed_account_id = account_context.account_id if account_context is not None else None
+                if (
+                    _is_native_worker_unavailable(exc)
+                    and failed_account_id
+                    and getattr(runtime_state, "account_client_pool", None) is not None
+                    and attempt + 1 < max_retries
+                ):
+                    _record_request_result(model, "errors", account_id=failed_account_id)
+                    last_error = exc
+                    exclude_account_id = failed_account_id
+                    logger.warning("Chat native worker unavailable，已排除当前账号并重试 %d/%d: %s", attempt + 1, max_retries, exc)
+                    continue
+                _record_request_result(model, "errors", account_id=failed_account_id)
                 raise _upstream_exception(exc) from exc
             except AistudioError as exc:
                 _record_request_result(model, "errors", account_id=account_context.account_id if account_context is not None else None)
@@ -2990,6 +3006,19 @@ def _build_streaming_response(
                             logger.warning("Stream 收到 204，清理 snapshot 缓存后重试一次")
                             _clear_client_capture_state(active_client)
                             continue
+                        if _is_native_worker_unavailable(exc) and not saw_content and stream_attempt + 1 < max_stream_attempts:
+                            replacement_context = await _request_replacement_account_context(
+                                fallback_client=fallback_client or active_client,
+                                model=model,
+                                account_context=active_account_context,
+                                affinity_key=affinity_key,
+                            )
+                            if replacement_context is not None:
+                                logger.warning("Stream native worker unavailable，已排除当前账号并重试下一个账号: %s", exc)
+                                _record_request_result(model, "errors", account_id=_account_id_for_stats(active_account_context))
+                                active_account_context = replacement_context
+                                active_client = replacement_context.client
+                                continue
                         raise
                     except AuthError as exc:
                         if saw_content:
@@ -3164,7 +3193,20 @@ async def handle_gemini_generate_content(
                     raise _upstream_exception(last_error) from exc
                 raise
             except RequestError as exc:
-                _record_request_result(normalized["model"] if normalized else model_path, "errors", account_id=account_context.account_id if account_context is not None else None)
+                error_model = normalized["model"] if normalized else model_path
+                failed_account_id = account_context.account_id if account_context is not None else None
+                if (
+                    _is_native_worker_unavailable(exc)
+                    and failed_account_id
+                    and getattr(runtime_state, "account_client_pool", None) is not None
+                    and attempt + 1 < max_retries
+                ):
+                    _record_request_result(error_model, "errors", account_id=failed_account_id)
+                    last_error = exc
+                    exclude_account_id = failed_account_id
+                    logger.warning("Gemini native worker unavailable，已排除当前账号并重试 %d/%d: %s", attempt + 1, max_retries, exc)
+                    continue
+                _record_request_result(error_model, "errors", account_id=failed_account_id)
                 raise _upstream_exception(exc) from exc
             except AistudioError as exc:
                 _record_request_result(normalized["model"] if normalized else model_path, "errors", account_id=account_context.account_id if account_context is not None else None)
@@ -3292,6 +3334,19 @@ def _build_gemini_streaming_response(
                             logger.warning("Gemini stream 收到 204，清理 snapshot 缓存后重试一次")
                             _clear_client_capture_state(active_client)
                             continue
+                        if _is_native_worker_unavailable(exc) and not saw_content and stream_attempt + 1 < max_stream_attempts:
+                            replacement_context = await _request_replacement_account_context(
+                                fallback_client=fallback_client or active_client,
+                                model=normalized["model"],
+                                account_context=active_account_context,
+                                affinity_key=affinity_key,
+                            )
+                            if replacement_context is not None:
+                                logger.warning("Gemini stream native worker unavailable，已排除当前账号并重试下一个账号: %s", exc)
+                                _record_request_result(normalized["model"], "errors", account_id=_account_id_for_stats(active_account_context))
+                                active_account_context = replacement_context
+                                active_client = replacement_context.client
+                                continue
                         raise
                     except AuthError as exc:
                         if saw_content:

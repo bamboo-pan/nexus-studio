@@ -161,6 +161,29 @@ class AIStudioClient:
                 logger.warning("浏览器文本请求模板预热失败，仅完成页面预热: %s", exc)
                 raise
 
+    async def warmup_account_text_native(self) -> None:
+        """Warm up account-backed text GenerateContent through the native worker pool."""
+        if self._session is None:
+            return
+        probe_worker = getattr(self._session, "probe_native_worker_generate_content", None)
+        if not callable(probe_worker):
+            await self.warmup()
+            return
+        timeout_seconds = _configured_warmup_probe_timeout_seconds()
+        logger.info(
+            "AI Studio account warmup: probing native UI worker pool for model=%s",
+            DEFAULT_WARMUP_TEXT_MODEL,
+        )
+        status, raw, wire_model = await probe_worker(model=DEFAULT_WARMUP_TEXT_MODEL, timeout_ms=timeout_seconds * 1000)
+        self._validate_generate_content_probe_result(
+            model=DEFAULT_WARMUP_TEXT_MODEL,
+            status=status,
+            raw=raw,
+            wire_model=wire_model,
+            source="Native UI worker warmup",
+        )
+        logger.info("AI Studio account warmup: native UI worker pool is ready")
+
     async def _warmup_with_authuser_failover(
         self,
         *,
@@ -260,26 +283,14 @@ class AIStudioClient:
         if callable(probe_native):
             timeout_seconds = _configured_warmup_probe_timeout_seconds()
             status, raw, wire_model = await probe_native(model=model, timeout_ms=timeout_seconds * 1000)
-            expected_model = _expected_wire_model(model)
-            raw_text = raw.decode("utf-8", errors="replace")
-            logger.info(
-                "AI Studio warmup native probe result: requested=%s, wire_model=%s, status=%s, response_head=%s",
-                expected_model,
-                wire_model or "<unknown>",
-                status,
-                raw_text[:120],
+            self._validate_generate_content_probe_result(
+                model=model,
+                status=status,
+                raw=raw,
+                wire_model=wire_model,
+                source="Browser native warmup",
             )
-            if wire_model != expected_model:
-                raise AuthError(
-                    f"{AI_STUDIO_GENERATE_CONTENT_AUTH_GUIDANCE} Browser native warmup sent "
-                    f"{wire_model or '<unknown>'} instead of {expected_model}."
-                )
-            if status == 200:
-                return
-            classified = classify_error(status, raw_text)
-            if status in (401, 403):
-                raise type(classified)(f"{AI_STUDIO_GENERATE_CONTENT_AUTH_GUIDANCE} Upstream returned HTTP {status}: {raw_text[:200]}") from classified
-            raise classified
+            return
 
         if captured is None:
             raise RuntimeError("warmup replay probe requires a captured request")
@@ -294,6 +305,36 @@ class AIStudioClient:
         if status == 200:
             return
         raw_text = raw.decode("utf-8", errors="replace")
+        classified = classify_error(status, raw_text)
+        if status in (401, 403):
+            raise type(classified)(f"{AI_STUDIO_GENERATE_CONTENT_AUTH_GUIDANCE} Upstream returned HTTP {status}: {raw_text[:200]}") from classified
+        raise classified
+
+    def _validate_generate_content_probe_result(
+        self,
+        *,
+        model: str,
+        status: int,
+        raw: bytes,
+        wire_model: str,
+        source: str,
+    ) -> None:
+        expected_model = _expected_wire_model(model)
+        raw_text = raw.decode("utf-8", errors="replace")
+        logger.info(
+            "AI Studio warmup native probe result: requested=%s, wire_model=%s, status=%s, response_head=%s",
+            expected_model,
+            wire_model or "<unknown>",
+            status,
+            raw_text[:120],
+        )
+        if wire_model != expected_model:
+            raise AuthError(
+                f"{AI_STUDIO_GENERATE_CONTENT_AUTH_GUIDANCE} {source} sent "
+                f"{wire_model or '<unknown>'} instead of {expected_model}."
+            )
+        if status == 200:
+            return
         classified = classify_error(status, raw_text)
         if status in (401, 403):
             raise type(classified)(f"{AI_STUDIO_GENERATE_CONTENT_AUTH_GUIDANCE} Upstream returned HTTP {status}: {raw_text[:200]}") from classified

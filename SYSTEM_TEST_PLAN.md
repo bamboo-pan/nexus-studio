@@ -12,7 +12,8 @@
 * 自定义 OpenAI-compatible provider 在 Local Studio Responses 模式下开启 search 后，上游流式 HTTP 400 被后端错误读取为 `httpx.ResponseNotRead`，导致 ASGI 异常。
 * 自定义 OpenAI-compatible provider 在 Local Studio Responses 模式下开启 search 后，请求体错误发送 `web_search_preview`，上游返回 `HTTP 400: Unsupported tool type: web_search_preview`。
 * 自定义 OpenAI-compatible provider 在 Local Studio Responses 模式下开启 `reasoning=high` + stream 后，上游返回 reasoning summary 但最终 `local_studio.completed` conversation 和 UI 没有可见思考过程。
-* Google/Gemini 账号预热完成后，首次真实对话仍长时间无输出；预热必须准备首个文本请求的浏览器捕获/模板路径，并通过 `GET /health` 的 warmup 状态区分“API 已启动”和“账号浏览器预热已完成”。
+* Google/Gemini 账号预热完成后，首次真实对话仍长时间无输出；账号态文本预热必须先通过每账号 native UI worker pool 完成真实 warmup `GenerateContent` probe，并通过 `GET /health` 的 warmup 状态区分“API 已启动”和“账号 native worker 已就绪”。旧浏览器捕获/模板路径只作为 raw replay fallback 的兼容准备，不能作为账号态文本 readiness 的硬门槛。
+* Google AI Studio 账号态文本请求必须通过每账号 native UI worker pool 复用独立干净进程；不能退回到每请求启动 helper，也不能回到同进程 hook 污染路径导致重新登录后 403。
 * Local Studio 重复发送历史 prompt 会立即复用旧结果；结果重放缓存必须移除，重复 prompt 必须 fresh upstream。
 * Local Studio stream 模式在 UI 中表现为一次性输出；SSE、no-buffer headers 和前端响应式更新必须让增量文本可见。
 
@@ -38,7 +39,8 @@
 | --- | --- | --- |
 | UI 可见性与状态 | 脚本只检查 API 200，但 UI 没显示结果；`Reasoning summary`、图片、工具过程、引用、错误或 usage 被隐藏；pending/tool-running 状态残留 | 所有 `*_visible`、`has_*`、`completed`、pending/error/disabled 状态字段都必须进入 pass/fail；成功路径必须截图或 DOM 断言用户可见结果；失败路径必须断言输入框恢复可用 |
 | Provider 与 request-log 签名 | 请求走错 provider/base URL/tool schema；OpenAI-compatible 使用 Google-only tool；Google provider 泄露 token；日志阶段缺失但 summary 仍通过 | `contains_*` 错误签名、provider/tool 名、upstream URL、Authorization 脱敏、lifecycle phase、group id 都必须断言；发现错误签名或缺阶段必须 fail |
-| 账号预热状态 | 脚本在后台 warmup 未完成时开始计时，误把冷启动耗时算成“预热后首次请求”；只看启动日志不看实际 warmup 完成 | 预热相关 smoke 必须先轮询 `GET /health` 的 `warmup.status`，只有 `complete` 后才测首次 Google/Gemini 文本请求延迟；`partial`/`failed`/`cancelled` 必须 fail 或记录 controlled limitation |
+| 账号预热状态 | 脚本在后台 warmup 未完成时开始计时，误把冷启动耗时算成“预热后首次请求”；旧 template capture 失败被误判成账号不可用，掩盖 native worker pool 已可真实生成 | 预热相关 smoke 必须先轮询 `GET /health` 的 `warmup.status`，只有 `complete` 后才测首次 Google/Gemini 文本请求延迟；账号态文本 warmup 必须有 native worker pool `GenerateContent` probe 成功证据；`partial`/`failed`/`cancelled` 必须 fail 或记录 controlled limitation |
+| Native UI worker 池 | 脚本只看到 API 成功，但实际仍每请求启动 helper、同账号请求被主 Camoufox executor 串行化，或 worker 失败后静默 raw replay 掩盖污染路径 | 账号态文本 smoke 必须断言 `AISTUDIO_NATIVE_UI_WORKERS_PER_ACCOUNT` 默认/配置值、server.log 中 native worker 启动数不超过配置、重复请求复用已启动 worker、并发请求能租用多个 worker；native UI 返回 `401/403/429` 时必须作为上游结果进入失败分类，不能先被 raw replay 覆盖 |
 | 能力过程保留 | reasoning/tool/search/image/usage/attachments 在 request log 有，但 API/UI/conversation 丢失；脚本只看最终文本 | 上游返回的 reasoning summary、tool call、search citation、image generation call、usage、附件引用必须至少在 API、最终 SSE、UI、conversation JSON、刷新恢复、request log 中按本计划要求保留；只剩最终文本或图片时必须 fail |
 | 恢复与重复路径 | 首次发送通过，但刷新、rerun、重复 prompt、错误重试、删除/导出后状态不一致 | 每个能力至少覆盖一个恢复路径；刷新后 UI 和 conversation JSON 一致；rerun 不污染旧消息；重复 prompt 必须再次走 upstream 且无 cache 标记；删除/导出 lifecycle 可审计 |
 | 结果缓存回归 | 同 prompt 第二次立即返回旧结果；UI 或 API 仍暴露 cache namespace / cache hit；脚本只看文本成功 | 重复 prompt 必须新增 upstream request-log phase；API 响应、SSE completed、assistant message 和 UI 均不得出现 Local Studio `cache.hit`/namespace 控件；provider-native 或浏览器底层缓存不得复用最终 assistant 结果 |
@@ -53,9 +55,10 @@
 | 项目 | 要求 |
 | --- | --- |
 | WSL 工作目录 | 在 `/home/bamboo` 下新建临时目录，例如 `/home/bamboo/nexus-studio-system-test-YYYYMMDD-HHMMSS` |
-| Google AI Studio 凭据 | 使用 `AGENTS.md` 指定的真实账号目录：Windows `\\wsl.localhost\Ubuntu-24.04\home\bamboo\aistudio-api\data\accounts`，WSL `/home/bamboo/aistudio-api/data/accounts`（历史凭据目录名保持不变） |
+| Google AI Studio 凭据 | 使用 `AGENTS.md` 指定的真实账号目录：Windows `\\wsl.localhost\Ubuntu-24.04\home\bamboo\nexus-studio\data\accounts`，WSL `/home/bamboo/nexus-studio/data/accounts` |
 | OpenAI-compatible key | Windows `C:\Users\bamboo\Documents\github\key.txt`，WSL `/mnt/c/Users/bamboo/Documents/github/key.txt` |
 | 浏览器 | Playwright/Camoufox 可启动真实 WebUI；UI 测试需截图和 console/network 记录 |
+| WSL 资源 | 浏览器密集型 API+UI+worker pool 系统测试需要可用 swap；若 `dmesg` 出现 `Out of memory: Killed process ... chrome-headless` 或 UI 阶段日志为空，先调整 `.wslconfig`（例如 `memory=4GB`、`swap=4GB`）并 `wsl --shutdown` 后重跑，不能把 OOM 误判为应用通过或失败 |
 | 服务端口 | 优先使用临时端口，例如 `18080`，避免和本机开发服务冲突 |
 | 数据目录 | 为每次测试设置独立 `AISTUDIO_LOCAL_STUDIO_DIR`、`AISTUDIO_REQUEST_LOGS_DIR`、`AISTUDIO_GENERATED_IMAGES_DIR`、`AISTUDIO_IMAGE_SESSIONS_DIR` |
 
@@ -73,7 +76,8 @@ python3 -m venv venv
 pip install -e .
 playwright install firefox
 export AISTUDIO_PORT=18080
-export AISTUDIO_ACCOUNTS_DIR=/home/bamboo/aistudio-api/data/accounts
+export AISTUDIO_ACCOUNTS_DIR=/home/bamboo/nexus-studio/data/accounts
+export AISTUDIO_NATIVE_UI_WORKERS_PER_ACCOUNT=3
 export AISTUDIO_LOCAL_STUDIO_DIR="$RUN_ROOT/data/local-studio"
 export AISTUDIO_REQUEST_LOGS_DIR="$RUN_ROOT/data/request-logs"
 export AISTUDIO_GENERATED_IMAGES_DIR="$RUN_ROOT/data/generated-images"
@@ -104,6 +108,7 @@ OPENAI_COMPAT_API_KEY="$(tr -d '\r\n' < "$OPENAI_COMPAT_KEY_FILE")"
 | 附件 | 无附件、图片、文本/PDF 类文件 | 只在当前模型能力允许时发送；不支持时 UI 必须阻止或提示 |
 | 会话 | 新建、发送、刷新恢复、重跑、重命名、单删、批量删除 | 验证本地持久化和 UI 状态恢复 |
 | 请求记录 | 关闭、开启、查看详情、导出、删除 | 开启后必须保存完整 lifecycle，敏感字段必须脱敏 |
+| Google AI Studio Native UI Worker | 默认 3、显式 1、重复请求复用、同账号并发、worker 失败重启、账号切换关闭旧池 | 账号态纯文本请求必须走每账号独立 native UI worker pool；worker 复用独立干净进程而不是每请求启动；native UI 不能安装主进程 hook/init script；只在无法解析/发送 native UI 时允许 raw replay fallback |
 | Provider Manager 阶段 | Phase 0 当前 Local Studio 兼容基线、Phase 1 control plane/registry、Phase 2 shared runtime gateway、Phase 3 advanced routing | 每轮先判定当前实现阶段；未实现阶段只能标记带证据的 `not_applicable`；已实现阶段必须跑对应 P0/P1 门禁 |
 | Control plane 合约 | Provider CRUD、enabled 状态、provider 类型、credential references、model catalog、manual models、aliases、health checks、routing policies、audit safety | Provider Manager 必须可在不进入 Local Studio 对话的情况下独立管理；secret 不返回 UI、不进入 request log/export；配置变更有审计记录 |
 | Data plane 合约 | canonical request、canonical response、protocol adapters、provider executors、response conversion、request logs | OpenAI Responses、OpenAI Chat Completions、Gemini、Claude Messages 和 Local Studio 消费同一 routing/attempt/logging 语义 |
@@ -156,6 +161,7 @@ Provider Manager 是 provider-model 池的控制面，不是 Local Studio 会话
 | Reasoning / Tool 过程保留 | 如果上游返回 reasoning summary、reasoning item、tool call、search citation、image generation invocation 或 usage，API 响应、UI、conversation JSON、刷新恢复、rerun、重复 prompt 和 request log 至少保留一份可展示或可审计结构；流式路径只要收到 reasoning 相关 SSE event，最终 `local_studio.completed` 的 assistant 必须有 `thinking`，UI 刷新后必须能看到 `Reasoning summary` 或等价入口；如果上游没有返回 summary，UI 必须显示可理解的空状态或省略入口，不能像丢失数据一样静默消失。 |
 | 无结果缓存 | Local Studio chat route 不得把最终 assistant 结果缓存并在等价 prompt 上复用；重复 prompt、跨 provider/mode/model/tool/reasoning/附件/token 变化都必须发起新的 upstream 调用；旧 `cache_enabled`/`cache_namespace` 字段如由兼容脚本发送必须被忽略。 |
 | 基础模块独立性 | Local Studio provider、tool、reasoning 设置不能污染 `#chat`、`#images`、`#accounts` 的原始业务线；即使 Local Studio 当前 provider 配置错误，基础入口仍应走原始账号池/基础 API 并可用。 |
+| Google AI Studio native UI worker 边界 | 账号态文本 `GenerateContent` 必须先解析 wire body 为纯文本 `(model, prompt)` 并交给每账号 `NativeUiWorkerPool`；worker 子进程通过 `native_ui_sender --worker` 复用独立 Camoufox/browser/context，不安装主进程 hook/init script；默认每账号 3 个 worker，重复请求复用，成功匹配的 native HTTP status/body 是权威结果；账号启动 warmup 以 native worker pool probe 成功作为 readiness；只在 native UI 无法解析/发送时才允许 raw replay fallback。 |
 | 请求记录横向服务 | Local Studio 和基础模块都必须以 group 展示完整生命周期；失败路径也必须保存 upstream request/response 或明确的未发起原因，导出 JSON 可解析且脱敏。 |
 | 错误一致性 | API error、SSE error、UI 当前会话错误、conversation JSON、request log、server stderr 和 health 状态必须一致；错误后输入框恢复可用，服务健康接口继续 200。 |
 | 敏感信息边界 | 真实 token、Authorization、Google cookie、storage state、账号凭据、原始大图 payload 不得出现在 UI 文案、conversation JSON、request log 导出、截图、server.log 或本仓库提交文件中。 |
@@ -355,6 +361,7 @@ Provider Manager 是 provider-model 池的控制面，不是 Local Studio 会话
 * 没有未捕获 ASGI 异常、浏览器 console error 或 Playwright 页面崩溃。
 * 所有成功路径都能在 UI 中看到用户可理解结果，并在 API/request log 中看到对应请求。
 * 所有失败路径都是受控失败，且服务继续可用。
+* Google AI Studio 账号态文本路径必须证明 native UI worker pool 生效：配置值可查询、重复请求未每次启动新 helper、同账号并发可以租用多个 worker、worker 失败会重启，且 native UI 匹配到的 `401/403/429` 不被 raw replay 覆盖。
 * 所有适用的架构契约断言必须通过；`not_applicable` 必须有明确原因，不能用于掩盖未覆盖路径。
 * Provider Manager / shared provider-model pool 阶段门禁必须通过：Phase 0 要证明当前 Local Studio 兼容基线未回归；Phase 1/2/3 一旦有对应实现入口，对应控制面、数据面、协议适配、路由/fallback 和审计安全断言不得整体跳过。
 * 测试 harness 本身也要通过门禁：每个 P0/P1 expected 字段、`contains_*` 错误签名、`assistant_has_*`/`*_visible` 可见性字段都必须有对应 fail 条件；只采集不判定的脚本不能作为“全部通过”的依据。

@@ -1,0 +1,45 @@
+{
+  "group_total": 7,
+  "entry_total": 20,
+  "upstream_models": [
+    {
+      "kind": "local_studio_responses_stream",
+      "model": "gemini-3.5-flash",
+      "wire_model": null,
+      "status_code": 200,
+      "response_prefix": "event: response.created\ndata: {\"type\": \"response.created\", \"response\": {\"id\": \"resp_5128618ce8494f3db0b47ac4\", \"object\": \"response\", \"created_at\": 1780714029, \""
+    },
+    {
+      "kind": "stream_generate_content",
+      "model": "gemini-3.5-flash",
+      "wire_model": "models/gemini-3.5-flash",
+      "status_code": 200,
+      "response_prefix": "[[[[[[[[null,\"nexus-permission-ui-ok\"]],\"model\"]]],null,[92,7,261,null,[[1,92]],null,null,null,null,162],null,null,null,null,\"v1_ChdWb29qYXVDV0lZcXdzT0lQNDZIbG1"
+    },
+    {
+      "kind": "stream_generate_content",
+      "model": "gemini-3.5-flash",
+      "wire_model": "models/gemini-3.5-flash",
+      "status_code": 200,
+      "response_prefix": "[[[[[[[[null,\"nexus-permission-api-ok\"]],\"model\"]]],null,[92,7,238,null,[[1,92]],null,null,null,null,139],null,null,null,null,\"v1_ChdLSW9qYXVHUkU0cXdzT0lQNDZIbG"
+    }
+  ],
+  "status_codes": [
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200
+  ],
+  "preview_model_seen": false,
+  "target_model_seen": true,
+  "error_prefixes": [
+    "event: response.created\ndata: {\"type\": \"response.created\", \"response\": {\"id\": \"resp_5128618ce8494f3db0b47ac4\", \"object\": \"response\", \"created_at\": 1780714029, \"",
+    "[[[[[[[[null,\"nexus-permission-ui-ok\"]],\"model\"]]],null,[92,7,261,null,[[1,92]],null,null,null,null,162],null,null,null,null,\"v1_ChdWb29qYXVDV0lZcXdzT0lQNDZIbG1",
+    "[[[[[[[[null,\"nexus-permission-api-ok\"]],\"model\"]]],null,[92,7,238,null,[[1,92]],null,null,null,null,139],null,null,null,null,\"v1_ChdLSW9qYXVHUkU0cXdzT0lQNDZIbG"
+  ]
+}

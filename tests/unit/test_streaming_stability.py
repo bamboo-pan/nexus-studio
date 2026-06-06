@@ -177,7 +177,13 @@ def two_account_stream_runtime(tmp_path):
     return store, first, second, rotator, clients, FakeStreamClientPool(clients)
 
 
-def run_stream_account_switch_test(tmp_path, build_response):
+def run_stream_account_switch_test(
+    tmp_path,
+    build_response,
+    *,
+    error: Exception | None = None,
+    expected_clear_calls: int = 1,
+):
     store, first, second, rotator, clients, pool = two_account_stream_runtime(tmp_path / "accounts")
     old_busy_lock = runtime_state.busy_lock
     old_account_service = runtime_state.account_service
@@ -193,7 +199,7 @@ def run_stream_account_switch_test(tmp_path, build_response):
         assert lease is not None
         failing_id = lease.account.id
         replacement_id = second.id if failing_id == first.id else first.id
-        clients[failing_id].error = AuthError("GenerateContent permission check failed")
+        clients[failing_id].error = error or AuthError("GenerateContent permission check failed")
         clients[replacement_id].events = [("body", "replacement ok"), ("usage", {"total_tokens": 2})]
         account_context = RequestAccountContext(
             client=clients[failing_id],
@@ -215,9 +221,9 @@ def run_stream_account_switch_test(tmp_path, build_response):
     body = "".join(chunks)
     stats = rotator.get_all_stats()
     assert "replacement ok" in body
-    assert "GenerateContent permission check failed" not in body
+    assert str(error or "GenerateContent permission check failed") not in body
     assert body.rstrip().endswith("data: [DONE]")
-    assert clients[failing_id].clear_calls == 1
+    assert clients[failing_id].clear_calls == expected_clear_calls
     assert clients[failing_id].calls[0]["force_refresh_capture"] is False
     assert clients[replacement_id].calls[0]["force_refresh_capture"] is True
     assert stats[failing_id]["errors"] == 1
@@ -416,6 +422,29 @@ def test_openai_stream_auth_error_switches_account_before_error_event(tmp_path):
     run_stream_account_switch_test(tmp_path, build_response)
 
 
+def test_openai_stream_native_worker_unavailable_switches_account_before_error_event(tmp_path):
+    def build_response(client, account_context):
+        return _build_streaming_response(
+            client=client,
+            fallback_client=client,
+            capture_prompt="hello",
+            model="gemini-3.5-flash",
+            capture_images=None,
+            contents=[AistudioContent(role="user", parts=[AistudioPart(text="hello")])],
+            system_instruction=None,
+            cleanup_paths=[],
+            account_context=account_context,
+            affinity_key="stream-test",
+        )
+
+    run_stream_account_switch_test(
+        tmp_path,
+        build_response,
+        error=RequestError(503, "native UI worker unavailable: model picker not ready"),
+        expected_clear_calls=0,
+    )
+
+
 def test_openai_stream_success_updates_active_account_stats(tmp_path):
     account, service, rotator = account_runtime(tmp_path / "accounts")
     client = FakeStreamClient(events=[("body", "hello"), ("usage", {"total_tokens": 2})])
@@ -552,6 +581,24 @@ def test_gemini_stream_auth_error_switches_account_before_error_event(tmp_path):
         )
 
     run_stream_account_switch_test(tmp_path, build_response)
+
+
+def test_gemini_stream_native_worker_unavailable_switches_account_before_error_event(tmp_path):
+    def build_response(client, account_context):
+        return _build_gemini_streaming_response(
+            client=client,
+            fallback_client=client,
+            normalized=gemini_normalized(),
+            account_context=account_context,
+            affinity_key="stream-test",
+        )
+
+    run_stream_account_switch_test(
+        tmp_path,
+        build_response,
+        error=RequestError(503, "native UI worker unavailable: model picker not ready"),
+        expected_clear_calls=0,
+    )
 
 
 def test_to_openai_tool_calls_stringifies_dict_arguments():

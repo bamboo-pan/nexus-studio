@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/index.md","reason":"Quality-check entry point for backend changes."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify native UI permission-boundary and worker-pool contracts."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check config/API/docs/test-plan consistency across layers."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Check new helper/pool code against existing patterns and constants."}
+{"file":".trellis/tasks/06-06-native-ui-worker-pool/prd.md","reason":"Verify all acceptance criteria and out-of-scope boundaries."}

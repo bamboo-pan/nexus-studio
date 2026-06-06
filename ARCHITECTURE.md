@@ -86,6 +86,52 @@ flowchart LR
     class Output output;
 ```
 
+## Google AI Studio Native UI Worker Pool
+
+Google AI Studio 账号态文本生成使用独立 native UI worker pool 作为可靠执行边界。这个边界服务 Local Studio 的 Google provider、OpenAI/Gemini/Claude 兼容入口中最终落到 Google AI Studio 文本 `GenerateContent` 的路径，也服务基础 Playground 文本路径；它不是 Local Studio 私有实现。
+
+此前同一个 Python 进程里的 hook/template 捕获浏览器、隔离 context 和 raw replay 会共享 Playwright/Camoufox 进程状态；账号重新登录后，AI Studio 页面真实可用，但同进程 native/replay 仍可能返回 `403 permission`。当前架构把账号态文本发送移到每个账号自己的 native UI worker 子进程中：主进程只负责解析 AI Studio wire body，worker 子进程负责打开 AI Studio UI、选择模型、填入 prompt、点击运行并匹配真实 `GenerateContent` 响应。
+
+```mermaid
+flowchart LR
+    AccountPool["AccountClientPool\n每账号一个 AIStudioClient"] --> Session["BrowserSession\nworker warmup + fallback template"]
+    Session -->|text-only wire body| Decode["解析 model + prompt"]
+    Decode --> WorkerPool{{"NativeUiWorkerPool\n每账号独立池\n默认 3 个 worker"}}
+    WorkerPool --> Worker1["worker 1\npython -m native_ui_sender --worker\n独立 Camoufox 进程"]
+    WorkerPool --> Worker2["worker 2\n独立 Camoufox 进程"]
+    WorkerPool --> Worker3["worker 3\n独立 Camoufox 进程"]
+    Worker1 --> UI1["AI Studio UI\nstorage_state=账号 auth\n无主进程 hook"]
+    Worker2 --> UI2["AI Studio UI\nstorage_state=账号 auth\n无主进程 hook"]
+    Worker3 --> UI3["AI Studio UI\nstorage_state=账号 auth\n无主进程 hook"]
+    UI1 --> Match["匹配目标 model + prompt marker\n返回 GenerateContent status/body"]
+    UI2 --> Match
+    UI3 --> Match
+    Match --> Response["兼容 API / Local Studio / 基础 Playground 响应"]
+    Session -. "仅 native 不可解析/不可发送时" .-> RawReplay["主浏览器 raw/context replay fallback"]
+
+    classDef session fill:#eef2ff,stroke:#4f46e5,stroke-width:1.8px,color:#111827;
+    classDef worker fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px,color:#111827;
+    classDef replay fill:#fff7ed,stroke:#ea580c,stroke-width:1.5px,color:#111827;
+    classDef response fill:#fefce8,stroke:#ca8a04,stroke-width:1.8px,color:#111827;
+
+    class AccountPool,Session,Decode session;
+    class WorkerPool,Worker1,Worker2,Worker3,UI1,UI2,UI3 worker;
+    class RawReplay replay;
+    class Match,Response response;
+```
+
+关键运行契约：
+
+- 每个账号的 `AIStudioClient` 拥有自己的 `BrowserSession`，因此 native UI worker pool 也是账号隔离的。账号启动 warmup 的成功门槛是该账号的 native UI worker pool 对 warmup text model 完成一次真实 `GenerateContent` probe；旧 hook/template capture 只作为 raw replay fallback 的兼容准备，不能再决定账号态文本 readiness。账号切换或账号 client 关闭时会终止旧 worker pool，避免旧 storage state 被继续使用。
+- `AISTUDIO_NATIVE_UI_WORKERS_PER_ACCOUNT` 控制每个账号的 worker 数，默认 `3`；全局 `AISTUDIO_MAX_CONCURRENCY` 和账号 rotator 仍决定整体请求并发上限。单个 worker 一次只处理一个请求，同账号多个请求可租用不同 worker 并发执行。
+- worker 子进程通过 JSONL 协议与主进程通信，命令入口为 `python -m aistudio_api.infrastructure.gateway.native_ui_sender --worker`。旧的一次性 stdin/stdout 模式保留用于诊断，但运行时账号态文本请求走 worker pool。
+- worker 进程保留自己的 Camoufox/browser/context，并且不安装主进程的 transport hook/init script；这保留了修复账号 relogin 403 所需的 clean-process 权限边界，同时避免每次请求都重启 Python 和浏览器。
+- native UI 成功匹配到目标 `GenerateContent` 后，其 HTTP status/body 是权威结果。即使 status 是 `401`、`403` 或 `429`，也按上游真实结果返回和分类，不能再先切到 raw replay 覆盖。
+- native UI 仅支持可解析为纯文本 prompt 的 AI Studio wire body。包含 inline/file parts 或无法解析的 body 才允许回退到主浏览器 raw/context replay 兼容路径。
+- worker UI 请求失败（例如冷页面尚未暴露目标模型选择器）按请求级失败处理：pool 会在不重启进程的情况下换用池内可用 worker 重试，最多覆盖配置的 worker 数。worker 进程退出、超时、stdout 协议损坏或返回 malformed body 时，pool 才重启对应 worker 并重试；仍失败时才进入上层 fallback/error 处理。
+
+这个设计回答了两个同时存在的约束：可靠性上仍避开同进程 hook 污染，性能上则把“一请求一启动”的冷启动开销变成“每账号固定 worker 池复用”。
+
 ## Local Studio 统一对话引擎工具调用语义
 
 工具开关表示允许模型使用该工具，不表示每次请求都强制调用工具。普通对话仍然可以保持普通对话；只有当用户请求确实需要搜索或画图时，才调用已启用的工具。

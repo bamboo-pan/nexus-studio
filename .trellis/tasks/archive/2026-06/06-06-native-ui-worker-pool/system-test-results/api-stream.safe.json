@@ -1,0 +1,7 @@
+{
+  "status_code": 200,
+  "content_prefix": "nexus-permission-api-ok",
+  "error_event": null,
+  "raw_prefix": "data: {\"id\": \"chatcmpl-5be6c168c7b2\", \"object\": \"chat.completion.chunk\", \"created\": 1780714026, \"model\": \"gemini-3.5-flash\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"nexus-permission-api-ok\"}, \"finish_reason\": null}], \"usage\": null}data: {\"id\": \"chatcmpl-5be6c168c7b2\", \"object\": \"chat.completion.chunk\", \"created\": 1780714026, \"model\": \"gemini-3.5-flash\", \"choices\": [{\"in",
+  "done_seen": true
+}
