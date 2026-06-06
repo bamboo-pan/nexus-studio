@@ -35,3 +35,18 @@ The task system test must fail if any upstream request for the test chain uses `
 - `tests/unit/test_streaming_stability.py`
 - `tests/unit/test_gemini_native_routes.py`
 - `tests/unit/test_openai_compatibility.py`
+
+## Follow-up: account test and delete-account gaps
+
+The user reported that account health checks returned HTTP 200 while startup logged both accounts as isolated. The reason is that `POST /accounts/{id}/test` is an HTTP endpoint that returns an `AccountHealthResponse`; HTTP 200 means the health-check request was handled, not that the account can generate with a selected model. Its positive result only validates local credential shape: Google cookies are present, unexpired, and AI Studio origin browser storage exists. Real generation readiness must be proved by startup/account warmup (`GET /health` warmup status) or an actual API/UI generation request for the selected model.
+
+The delete-account 500 was a separate uncovered regression: `AccountStore.delete_account()` called `shutil.rmtree()` without importing `shutil`. Existing unit tests covered account import/export/health/update paths, but not store deletion or `DELETE /accounts/{id}` through FastAPI, and the previous real UI smoke opened the accounts page without deleting a copied account.
+
+Added regression coverage:
+
+- Unit: `AccountStore.delete_account()` removes the account directory and promotes the next active account.
+- Unit: `DELETE /accounts/{id}` returns `{"ok": true}`, removes the account directory, and invalidates the account client pool.
+- Static frontend: the account test toast says credential check success, with generation permission delegated to warmup/real requests.
+- System plan: `BASE-ACC-02` and `API-ACC-01` require account deletion in a WSL temporary account directory copy and treat `/accounts/{id}/test` as insufficient for generation readiness.
+- Real WSL smoke result recorded in `system-test-results/account-delete.safe.json`: temporary smoke accounts were created in a copied account directory, one was tested/deleted through HTTP API and one through the browser UI, with no console errors, no 5xx responses, no ASGI exception, and no `NameError`/`shutil` server log signature.
+- Real account readiness preflight recorded in `system-test-results/real-account-preflight.safe.json`: both stored real accounts still have unexpired Google cookies but lack `https://aistudio.google.com` origin storage, so real generation smoke is blocked until re-login or importing a Playwright storage state captured after AI Studio fully loads.

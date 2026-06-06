@@ -1,0 +1,33 @@
+{
+  "status": "blocked_by_credentials",
+  "kind": "read_only_real_account_storage_shape_preflight",
+  "accounts_dir": "/home/bamboo/nexus-studio/data/accounts",
+  "mutated_account_files": false,
+  "printed_credentials": false,
+  "account_count": 2,
+  "accounts": [
+    {
+      "id": "acc_d45e4ea5",
+      "stored_health_status": "isolated",
+      "auth_exists": true,
+      "google_cookie_count": 29,
+      "has_unexpired_google_cookie": true,
+      "has_aistudio_origin": false,
+      "has_aistudio_local_storage": false,
+      "has_aistudio_indexed_db": false,
+      "generate_ready_shape": false
+    },
+    {
+      "id": "acc_ecb5f1e6",
+      "stored_health_status": "isolated",
+      "auth_exists": true,
+      "google_cookie_count": 29,
+      "has_unexpired_google_cookie": true,
+      "has_aistudio_origin": false,
+      "has_aistudio_local_storage": false,
+      "has_aistudio_indexed_db": false,
+      "generate_ready_shape": false
+    }
+  ],
+  "conclusion": "Both real accounts still have unexpired Google cookies, but neither storage state contains https://aistudio.google.com origin storage. They cannot pass the current GenerateContent readiness gate until the account is re-logged in or a Playwright storage state captured after AI Studio fully loads is imported. POST /accounts/{id}/test must not be treated as real generation proof."
+}

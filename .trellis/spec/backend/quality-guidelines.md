@@ -102,6 +102,87 @@ Questions to answer:
 
 ---
 
+## Scenario: Account Health Check And Delete Lifecycle
+
+### 1. Scope / Trigger
+- Trigger: Account management changes that touch `AccountStore`, `AccountService`, `/accounts/*` routes, frontend account controls, startup warmup readiness, or WSL account smoke tests.
+- Scope: account registry files under `data/accounts`, `auth.json`/`meta.json`, `/accounts/{id}/test`, `/accounts/{id}` deletion, `/health` warmup status, and `#accounts` UI actions.
+
+### 2. Signatures
+- API health check: `POST /accounts/{account_id}/test` returns `AccountHealthResponse` with HTTP 200 when the health-check request is handled, even when `ok` is false.
+- API delete: `DELETE /accounts/{account_id}` returns `{"ok": true}` for a deleted account and HTTP 404 with `{"detail":{"type":"not_found",...}}` when the account does not exist.
+- Readiness oracle: `GET /health` returns `warmup.status` plus target/completed/failed account lists.
+- Frontend account view: `#accounts` calls `testAccount(a)` and `deleteAccount(a)` from `src/aistudio_api/static/app.js`.
+
+### 3. Contracts
+- `/accounts/{id}/test` is a local credential-shape check. Success means the storage state has non-expired Google cookies and AI Studio origin browser storage; it does not prove that the account can generate with any selected model.
+- Real text generation readiness must come from successful account warmup in `GET /health` or an actual API/UI generation request for the selected model.
+- A storage state with Google cookies but no `https://aistudio.google.com` origin storage is not GenerateContent-ready and must be treated as isolated until the user re-logs in or imports a Playwright storage state captured after AI Studio fully loads.
+- Deleting an account must remove the account directory, remove the registry entry, keep `active_account_id` either null or pointing at an existing account, and invalidate any account client pool entry for that account.
+- Account deletion tests and smoke runs must operate on a temporary copy of real account directories or synthetic smoke accounts. They must never delete from the source credential directory.
+- Frontend success wording for `/accounts/{id}/test` must not imply real generation permission; it should distinguish credential check success from warmup/real request success.
+
+### 4. Validation & Error Matrix
+- Missing `auth.json` -> health check returns `ok=false`, status `missing_auth`, and the account is isolated.
+- Expired Google cookies -> health check returns `ok=false`, status `expired`, and the account is isolated.
+- Google cookies present but AI Studio origin storage missing -> health check returns `ok=false`, status `isolated`, with the AI Studio browser storage re-login/import message.
+- Valid credential shape -> health check returns `ok=true`, status `healthy`, but generation permission remains delegated to warmup or real generation.
+- Existing account deletion -> HTTP 200, directory removed, registry updated, client pool invalidated.
+- Missing account deletion -> HTTP 404, no ASGI 500.
+- Server log contains `Exception in ASGI application`, `NameError`, or `500 Internal Server Error` during account deletion smoke -> test fails.
+
+### 5. Good/Base/Bad Cases
+- Good: `DELETE /accounts/acc_smoke_delete_api` against a temporary accounts copy returns 200, removes that directory, and a second delete returns 404.
+- Good: UI account deletion removes the row, emits no console errors, and no network response is 5xx.
+- Base: `/accounts/{id}/test` returns HTTP 200 with `ok=false` for an isolated credential; UI shows the reason and does not treat it as ready for generation.
+- Bad: Treating HTTP 200 from `/accounts/{id}/test` as evidence that `gemini-3.5-flash` generation will succeed.
+- Bad: Running a delete-account system smoke against `/home/bamboo/nexus-studio/data/accounts` directly.
+
+### 6. Tests Required
+- Unit: `AccountStore.delete_account()` removes the directory and promotes or clears the active account safely.
+- Unit/API: `DELETE /accounts/{id}` returns 200, invalidates `account_client_pool`, and leaves no account directory; repeat delete returns 404.
+- Unit/static frontend: account health-check success text says credential check success and points generation permission to warmup/real requests.
+- Real WSL API smoke: delete a temporary/synthetic account under a copied accounts directory and assert 200/404 controlled responses, registry consistency, and no server-log 500/ASGI exception.
+- Real WSL UI smoke: open `#accounts`, run health check, delete a temporary/synthetic account row, assert row removal, no console errors, and no 5xx responses.
+- Real readiness check: when generation smoke is blocked, record a safe preflight summary with account ids, boolean storage-shape fields, and no cookie/token/storage-state values.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+```python
+# HTTP 200 only means the health-check endpoint handled the request.
+response = client.post(f"/accounts/{account_id}/test")
+assert response.status_code == 200
+mark_generation_ready(account_id)
+```
+
+#### Correct
+```python
+response = client.post(f"/accounts/{account_id}/test")
+body = response.json()
+assert response.status_code == 200
+assert body["ok"] is True
+
+health = client.get("/health").json()
+assert health["warmup"]["status"] == "complete"
+```
+
+#### Wrong
+```bash
+# Do not delete from the source credential directory during smoke tests.
+export AISTUDIO_ACCOUNTS_DIR=/home/bamboo/nexus-studio/data/accounts
+curl -X DELETE "http://127.0.0.1:8080/accounts/$ACCOUNT_ID"
+```
+
+#### Correct
+```bash
+rsync -a /home/bamboo/nexus-studio/data/accounts/ "$RUN_ROOT/data/accounts/"
+export AISTUDIO_ACCOUNTS_DIR="$RUN_ROOT/data/accounts"
+curl -X DELETE "http://127.0.0.1:$PORT/accounts/$SMOKE_ACCOUNT_ID"
+```
+
+---
+
 ## Scenario: AI Studio Native Generation Permission Boundary
 
 ### 1. Scope / Trigger

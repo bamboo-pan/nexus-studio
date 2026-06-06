@@ -11,6 +11,8 @@ Fix the AI Studio streaming permission failure that still occurs after two accou
 * The stream then fails twice with `The caller does not have permission` after clearing snapshot cache once.
 * Source inspection found `src/aistudio_api/infrastructure/gateway/wire_codec.py` mapping `gemini-3.5-flash` to `models/gemini-3-flash-preview`.
 * Repo memory says startup warmup must use a safe dedicated warmup model and must not assume the default text model is authorized for every account.
+* User follow-up showed `/accounts/{id}/test` returned HTTP 200 while startup preflight still isolated both real accounts because their storage states lacked AI Studio browser storage.
+* User follow-up also exposed `DELETE /accounts/{id}` returning HTTP 500 with `NameError: name 'shutil' is not defined`.
 
 ## Requirements
 
@@ -19,6 +21,8 @@ Fix the AI Studio streaming permission failure that still occurs after two accou
 * When a model is unsupported or unauthorized, report a clear model/account error and avoid repeated reuse of bad snapshot/template data.
 * Keep existing Gemini/OpenAI-compatible request contracts working.
 * Add or update focused tests around model wire encoding and the permission failure path.
+* Make account health-check UI wording clear that `/accounts/{id}/test` is a credential-shape check and not a real generation permission proof.
+* Account deletion must be covered by unit tests plus real WSL API/UI smoke tests using a temporary copy of the accounts directory, not the source credential directory.
 
 ## Acceptance Criteria
 
@@ -27,6 +31,8 @@ Fix the AI Studio streaming permission failure that still occurs after two accou
 * [ ] Relevant unit tests pass.
 * [ ] Real WSL API system test passes using the account credentials under `/home/bamboo/nexus-studio/data/accounts`.
 * [ ] Real frontend UI system test passes against the local studio/API flow.
+* [ ] `DELETE /accounts/{id}` returns 200/404 controlled responses and does not raise ASGI 500; the UI delete flow removes the row without console or 5xx errors.
+* [ ] `/accounts/{id}/test` success is not presented as proof of real model generation permission; real readiness must come from `GET /health` warmup or actual API/UI generation.
 * [ ] Final branch is merged to `main` through a PR, local `main` is synced, and the merged feature branch is deleted.
 
 ## Definition of Done

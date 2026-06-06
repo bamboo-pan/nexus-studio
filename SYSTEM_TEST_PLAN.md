@@ -270,6 +270,7 @@ Provider Manager 是 provider-model 池的控制面，不是 Local Studio 会话
 | BASE-IMG-02 | `#images` | 上传历史图/参考图后做编辑或重试 | 参考图、基图、历史会话、下载/删除不回归 |
 | BASE-REQ-01 | `#requests` | 查看、复制、导出、批量删除多组请求 | 对 Local Studio 和基础模块请求都能按 group 展示完整 lifecycle |
 | BASE-ACC-01 | `#accounts` | 列出账号、健康检查、切换/激活账号、查看池状态 | 账号管理线仍独立工作；不会因 Local Studio provider 封装被隐藏或破坏 |
+| BASE-ACC-02 | `#accounts` | 在 WSL 临时目录复制真实账号目录副本，删除副本中的一个非唯一账号，再刷新账号页 | API `DELETE /accounts/{id}` 返回 200 且账号目录被删除；UI 不出现 500/ASGI exception；真实源账号目录不被修改；若只剩一个账号则先导入/复制临时账号再删除 |
 
 ## P1 API 级直接验证
 
@@ -287,6 +288,7 @@ Provider Manager 是 provider-model 池的控制面，不是 Local Studio 会话
 | API-LS-10 | `POST /api/local-studio/chat` | Local Studio 使用错误 OpenAI-compatible provider 后再调用基础 `/v1/*` 与 `/v1beta/*` API smoke | Local Studio 错误被保存为受控错误；基础 API 不受影响；请求日志 group 能清楚区分 Local Studio provider 请求与基础业务线请求 |
 | API-REQ-01 | `/request-logs/*` | status、list、detail、export、delete | lifecycle 完整且导出 JSON 可解析 |
 | API-BASE-01 | `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/images/generations` | 基础 API smoke | 基础兼容 API 不因 Local Studio 改造回归 |
+| API-ACC-01 | `GET /health`、`GET /accounts`、`POST /accounts/{id}/test`、`DELETE /accounts/{id}` | 使用 WSL 临时账号目录副本；先确认 startup warmup `complete` 或按失败状态明确判定不可用，再对临时副本账号执行健康检查和删除 | `/accounts/{id}/test` 只作为凭据形状检查，不得替代真实生成或 `GET /health` warmup oracle；删除账号必须返回 200/404 的受控结果且不得出现 500；删除后 registry、账号目录、active account 一致 |
 
 ## Bug 专项断言
 

@@ -1,12 +1,13 @@
 import asyncio
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from fastapi import FastAPI
 
-from aistudio_api.api.dependencies import get_account_service
+from aistudio_api.api.dependencies import get_account_service, get_runtime_state
 from aistudio_api.api.routes_accounts import router as accounts_router
 from aistudio_api.application.account_service import AccountService
 from aistudio_api.infrastructure.account import account_store as account_store_module
@@ -189,6 +190,45 @@ def test_import_credentials_validates_backup_email_metadata_before_saving(tmp_pa
         target.import_credentials(backup)
 
     assert target.list_accounts() == []
+
+
+def test_delete_account_removes_directory_and_promotes_next_active_account(tmp_path):
+    store = AccountStore(accounts_dir=tmp_path)
+    first = store.save_account("first", "first@example.com", storage_state(cookie_name="sid1"))
+    second = store.save_account("second", "second@example.com", storage_state(cookie_name="sid2"))
+
+    deleted = store.delete_account(second.id)
+
+    assert deleted is True
+    assert store.get_account(second.id) is None
+    assert not (tmp_path / second.id).exists()
+    assert store.get_active_account().id == first.id
+
+
+def test_delete_account_route_removes_account_and_invalidates_pool(tmp_path):
+    store = AccountStore(accounts_dir=tmp_path)
+    account = store.save_account("main", "main@example.com", storage_state())
+    service = AccountService(store, LoginService())
+    invalidated = []
+
+    class FakeAccountClientPool:
+        async def invalidate(self, account_id):
+            invalidated.append(account_id)
+
+    app = FastAPI()
+    app.include_router(accounts_router)
+    app.dependency_overrides[get_account_service] = lambda: service
+    app.dependency_overrides[get_runtime_state] = lambda: SimpleNamespace(
+        account_client_pool=FakeAccountClientPool()
+    )
+
+    response = request_app(app, "DELETE", f"/accounts/{account.id}")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert invalidated == [account.id]
+    assert store.get_account(account.id) is None
+    assert not (tmp_path / account.id).exists()
 
 
 def test_export_credentials_route_marks_sensitive_response_no_store(tmp_path):

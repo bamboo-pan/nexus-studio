@@ -83,3 +83,42 @@ Implemented per-account clean native UI worker pools for AI Studio text sends, d
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: Fix account deletion and health readiness
+
+**Date**: 2026-06-06
+**Task**: Fix account deletion and health readiness
+**Branch**: `feature/fix-account-delete-and-relogin-tests`
+
+### Summary
+
+Fixed account deletion 500, clarified account health readiness, added regression/system-test evidence, and recorded the real-account relogin requirement.
+
+### Main Changes
+
+- Fixed the account deletion crash by importing shutil in AccountStore and adding store/API regression coverage for DELETE /accounts/{id}.
+- Clarified the #accounts health-check toast so POST /accounts/{id}/test is not presented as real generation permission proof.
+- Expanded SYSTEM_TEST_PLAN.md and backend quality spec with the account health/delete lifecycle contract.
+- Recorded safe Trellis evidence for real WSL API/UI account deletion smoke and real-account readiness preflight.
+- Verification: pytest tests/unit -q -> 460 passed; WSL account-delete API/UI smoke -> ACCOUNT_DELETE_SMOKE_PASS; real account read-only preflight showed both stored accounts lack https://aistudio.google.com origin storage, so generation smoke is blocked until re-login or importing a Playwright storage state captured after AI Studio fully loads.
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `62cc22b` | (see git log) |
+| `0cbc132` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
