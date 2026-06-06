@@ -50,3 +50,36 @@ Real Google account validation was skipped per user instruction because accounts
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: Add native UI worker pool
+
+**Date**: 2026-06-06
+**Task**: Add native UI worker pool
+**Branch**: `feature/fix-aistudio-permission-relogin`
+
+### Summary
+
+Implemented per-account clean native UI worker pools for AI Studio text sends, documented the architecture and system-test oracles, passed 458 unit tests, and passed the real WSL API/UI/worker-pool system test.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `dfbaf84` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

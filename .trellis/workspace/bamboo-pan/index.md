@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 1
-- **Last Active**: 2026-06-03
+- **Total Sessions**: 2
+- **Last Active**: 2026-06-06
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~52 | Active |
+| `journal-1.md` | ~85 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 2 | 2026-06-06 | Add native UI worker pool | `dfbaf84` | `feature/fix-aistudio-permission-relogin` |
 | 1 | 2026-06-03 | Remove legacy storage compatibility | `05f2d12`, `a2d28d6` | `feature/remove-legacy-compat` |
 <!-- @@@/auto:session-history -->
 
