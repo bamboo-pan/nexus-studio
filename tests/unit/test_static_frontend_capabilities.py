@@ -478,6 +478,8 @@ def test_static_frontend_exposes_account_health_tier_controls():
     assert "tierLabel(a.tier)" in index_html
     assert "testAccount(a)" in app_js
     assert "/test`" in app_js
+    assert "凭据检查通过，生成权限以预热和真实请求为准" in app_js
+    assert "账号检查通过" not in app_js
     assert "updateTier(a,tier)" in app_js
 
 
