@@ -1,0 +1,19 @@
+{
+  "view": "studio",
+  "model": "gemini-3.5-flash",
+  "stream": "on",
+  "busy": false,
+  "error": "",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Reply with exactly: nexus-permission-ui-ok",
+      "error": ""
+    },
+    {
+      "role": "assistant",
+      "content": "nexus-permission-ui-ok",
+      "error": ""
+    }
+  ]
+}

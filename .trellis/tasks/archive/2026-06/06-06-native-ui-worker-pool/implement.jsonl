@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend spec index for package-level guidance before implementation."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Gateway/native UI permission boundary contracts and tests to update for worker pool."}
+{"file":".trellis/spec/guides/index.md","reason":"Shared thinking-guide index required before cross-layer implementation."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Worker pool touches config, gateway, docs, tests, and real system test contracts."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"New helper/pool code and config require reuse search and consistency checks."}
+{"file":".trellis/tasks/06-06-native-ui-worker-pool/prd.md","reason":"Task requirements and acceptance criteria for this implementation."}

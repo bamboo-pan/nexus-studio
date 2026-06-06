@@ -1,0 +1,16 @@
+{
+  "status": "ok",
+  "busy": false,
+  "warmup": {
+    "status": "complete",
+    "target_accounts": [
+      "acc_d45e4ea5",
+      "acc_ecb5f1e6"
+    ],
+    "completed_accounts": [
+      "acc_d45e4ea5",
+      "acc_ecb5f1e6"
+    ],
+    "failed_accounts": []
+  }
+}
