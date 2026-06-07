@@ -122,3 +122,45 @@ Fixed account deletion 500, clarified account health readiness, added regression
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: Fix native UI worker WSL startup
+
+**Date**: 2026-06-07
+**Task**: Fix native UI worker WSL startup
+**Branch**: `feature/fix-native-ui-worker-wsl-system-test`
+
+### Summary
+
+Fixed native UI worker source-tree startup and verified it with unit, WSL API, and Windows host Playwright UI tests.
+
+### Main Changes
+
+Main changes:
+- Fixed native UI worker subprocess source-tree import path by passing repo src through worker PYTHONPATH.
+- Hardened native UI worker startup/readiness behavior and Local Studio timeout/config contracts.
+- Added WSL clean-copy system test harness with explicit source import, network, worker, API, and Windows host Playwright UI gates.
+- Updated SYSTEM_TEST_PLAN and backend quality spec so /api/local-studio/health alone is not treated as worker readiness.
+
+Testing:
+- C:/Users/bamboo/Desktop/nexus-studio/.venv/Scripts/python.exe -m pytest tests/unit -q -> 476 passed
+- wsl.exe bash /mnt/c/Users/bamboo/Desktop/nexus-studio/.trellis/tasks/06-06-fix-native-ui-worker-wsl-system-test/system-test-wsl.sh -> SYSTEM_TEST_PASS
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `38ca90f` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
