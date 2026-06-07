@@ -11,10 +11,12 @@ from aistudio_api.infrastructure.account import tier_detector
 from aistudio_api.infrastructure.account.tier_detector import AccountTier, TierResult
 from aistudio_api.infrastructure.gateway.native_ui_worker_pool import NativeUiWorkerProcessError
 from aistudio_api.infrastructure.gateway.session import (
+    AI_STUDIO_CURRENT_TEXT_MODEL_JS,
     AI_STUDIO_URL,
     AI_STUDIO_URL_FALLBACK,
     AI_STUDIO_URL_LEGACY_FALLBACK,
     BrowserSession,
+    _aistudio_chat_url_with_model,
     _aistudio_chat_urls,
 )
 
@@ -123,6 +125,8 @@ class FakePage:
         js_body_hook_enabled: bool = True,
         text_model_open_result: dict[str, object] | None = None,
         text_model_select_result: dict[str, object] | None = None,
+        text_model_current_result: dict[str, object] | None = None,
+        text_model_current_after_success: dict[str, object] | None = None,
     ):
         self.url = url
         self.has_default_makersuite = has_default_makersuite
@@ -142,8 +146,11 @@ class FakePage:
         self.js_body_hook_enabled = js_body_hook_enabled
         self.text_model_open_result = text_model_open_result or {"opened": True, "label": "Gemini 3.5 Flash"}
         self.text_model_select_result = text_model_select_result or {"selected": True, "label": "Gemini 3.5 Flash"}
+        self.text_model_current_result = text_model_current_result or {"matches": False, "label": "Chat Spark Playground"}
+        self.text_model_current_after_success = text_model_current_after_success or {"matches": True, "label": "Gemini 3.5 Flash"}
         self.text_model_open_calls = 0
         self.text_model_select_calls = 0
+        self.text_model_current_calls = 0
         self.goto_urls: list[str] = []
         self.goto_kwargs: list[dict[str, object]] = []
         self.wait_calls: list[int] = []
@@ -239,8 +246,13 @@ class FakePage:
         if "model_picker_not_found" in script:
             self.text_model_open_calls += 1
             return self.text_model_open_result
+        if script == AI_STUDIO_CURRENT_TEXT_MODEL_JS:
+            self.text_model_current_calls += 1
+            return self.text_model_current_result
         if "text_model_not_found" in script:
             self.text_model_select_calls += 1
+            if self.text_model_select_result.get("selected") is True or self.text_model_select_result.get("reason") == "already_selected":
+                self.text_model_current_result = self.text_model_current_after_success
             return self.text_model_select_result
         if "matchesSendIntent" in script:
             result = self.js_send_result
@@ -323,14 +335,17 @@ class BrowserSessionForTest(BrowserSession):
         super().__init__(port=0)
         self._hook_page = page
         self.goto_calls = 0
+        self.goto_models: list[str | None] = []
         self.install_calls = 0
 
     def _ensure_browser_sync(self):
         return object()
 
-    def _goto_aistudio_sync(self, page) -> None:
+    def _goto_aistudio_sync(self, page, **kwargs) -> None:
+        model = kwargs.get("model")
         self.goto_calls += 1
-        page.url = AI_STUDIO_URL
+        self.goto_models.append(model)
+        page.url = _aistudio_chat_url_with_model(AI_STUDIO_URL, model)
         page.has_default_makersuite = True
         page.has_textarea = True
 
@@ -398,9 +413,9 @@ class BrowserSessionWithCleanProbePageForTest(BrowserSessionForTest):
         self._ctx = FakeBrowserContext(pages=[hook_page], new_pages=[probe_page])
         self.goto_route_states: list[tuple[str | None, set[str]]] = []
 
-    def _goto_aistudio_sync(self, page) -> None:
+    def _goto_aistudio_sync(self, page, **kwargs) -> None:
         self.goto_route_states.append((self._preferred_chat_url, set(self._failed_chat_urls)))
-        super()._goto_aistudio_sync(page)
+        super()._goto_aistudio_sync(page, **kwargs)
 
     def _ensure_browser_sync(self, navigation_timeout_ms: int | None = None, chat_ready_timeout_ms: int | None = None):
         return self._ctx
@@ -510,6 +525,12 @@ def test_chat_url_candidates_are_authuser_scoped_and_configurable(monkeypatch):
         "https://aistudio.google.com/u/2/prompts/new_chat",
         "https://aistudio.google.com/u/0/prompts/new_chat",
         "https://aistudio.google.com/prompts/new_chat",
+    )
+    assert _aistudio_chat_urls("models/gemini-3.5-flash")[:4] == (
+        "https://aistudio.google.com/u/1/prompts/new_chat?model=gemini-3.5-flash",
+        "https://aistudio.google.com/u/2/prompts/new_chat?model=gemini-3.5-flash",
+        "https://aistudio.google.com/u/0/prompts/new_chat?model=gemini-3.5-flash",
+        "https://aistudio.google.com/prompts/new_chat?model=gemini-3.5-flash",
     )
 
 
@@ -980,11 +1001,12 @@ def test_send_hooked_request_uses_native_ui_before_context_replay_for_text_body(
     assert status == 200
     assert raw == b"native-ok"
     assert context.request.posts == []
-    assert probe_page.url == AI_STUDIO_URL
+    assert probe_page.url == "https://aistudio.google.com/u/2/prompts/new_chat?model=gemini-3.5-flash"
     assert probe_page.filled_texts == ["Reply with exactly: nexus-permission-api-ok"]
     assert probe_page.routed_requests[-1].continue_kwargs == {}
     assert hook_page.routed_requests == []
     assert session.goto_route_states[-1] == (None, set())
+    assert session.goto_models[-1] == "models/gemini-3.5-flash"
     assert probe_page.closed is True
 
 
@@ -1020,6 +1042,8 @@ def test_send_hooked_request_native_ui_fallback_uses_unhooked_isolated_context()
     assert probe_context.init_scripts == []
     assert probe_context.closed is True
     assert session._browser.new_context_calls == [{"service_workers": "block"}]
+    assert probe_page.url == "https://aistudio.google.com/u/2/prompts/new_chat?model=gemini-3.5-flash"
+    assert session.goto_models[-1] == "models/gemini-3.5-flash"
     assert probe_page.filled_texts == ["Reply with exactly: nexus-permission-api-ok"]
 
 
@@ -1037,7 +1061,7 @@ def test_send_native_generate_content_uses_worker_pool_when_auth_file_available(
             self.closed = False
             pools.append(self)
 
-        def send(self, *, model, prompt, timeout_ms):
+        def send(self, *, model, prompt, timeout_ms, max_attempts=None, retry_statuses=None):
             self.calls.append({"model": model, "prompt": prompt, "timeout_ms": timeout_ms})
             return 200, f"worker-ok-{len(self.calls)}".encode("utf-8")
 
@@ -1082,7 +1106,7 @@ def test_send_native_generate_content_uses_worker_pool_when_auth_file_available(
     ]
 
 
-def test_probe_native_worker_generate_content_uses_single_pool_attempt(tmp_path, monkeypatch):
+def test_probe_native_worker_generate_content_retries_permission_statuses(tmp_path, monkeypatch):
     auth_file = tmp_path / "auth.json"
     auth_file.write_text("{}", encoding="utf-8")
     calls = []
@@ -1092,21 +1116,43 @@ def test_probe_native_worker_generate_content_uses_single_pool_attempt(tmp_path,
             self.auth_file = auth_file
             self.worker_count = worker_count
 
-        def send_with_metadata(self, *, model, prompt, timeout_ms, max_attempts=None):
-            calls.append({"model": model, "prompt": prompt, "timeout_ms": timeout_ms, "max_attempts": max_attempts})
+        def send_with_metadata(self, *, model, prompt, timeout_ms, max_attempts=None, retry_statuses=None):
+            calls.append({
+                "model": model,
+                "prompt": prompt,
+                "timeout_ms": timeout_ms,
+                "max_attempts": max_attempts,
+                "retry_statuses": retry_statuses,
+            })
             return 200, b"ok", {"wire_model": f"models/{model}"}
 
         def close(self):
             pass
 
     monkeypatch.setattr(session_module, "NativeUiWorkerPool", FakeNativeUiWorkerPool)
+    monkeypatch.setattr(session_module.settings, "native_ui_workers_per_account", 2)
     session = BrowserSession(port=0)
     session._auth_file = str(auth_file)
 
     status, raw, wire_model = session._probe_native_worker_generate_content_sync(model="gemini-3.5-flash", timeout_ms=300000)
 
     assert (status, raw, wire_model) == (200, b"ok", "models/gemini-3.5-flash")
-    assert calls == [{"model": "gemini-3.5-flash", "prompt": "1", "timeout_ms": 300000, "max_attempts": 1}]
+    assert calls == [
+        {
+            "model": "gemini-3.5-flash",
+            "prompt": "1",
+            "timeout_ms": 300000,
+            "max_attempts": 1,
+            "retry_statuses": (401, 403),
+        },
+        {
+            "model": "gemini-3.5-flash",
+            "prompt": "1",
+            "timeout_ms": 300000,
+            "max_attempts": 1,
+            "retry_statuses": (401, 403),
+        }
+    ]
 
 
 def test_switch_auth_closes_native_worker_pool(tmp_path, monkeypatch):
@@ -1123,7 +1169,7 @@ def test_switch_auth_closes_native_worker_pool(tmp_path, monkeypatch):
             self.closed = False
             pools.append(self)
 
-        def send(self, *, model, prompt, timeout_ms):
+        def send(self, *, model, prompt, timeout_ms, max_attempts=None, retry_statuses=None):
             return 200, b"ok"
 
         def close(self):
@@ -1149,8 +1195,15 @@ def test_account_send_hooked_request_uses_native_worker_executor(tmp_path, monke
     session._auth_file = str(auth_file)
     calls = []
 
-    def fake_worker_send(*, model, prompt, timeout_ms):
-        calls.append({"thread": threading.current_thread().name, "model": model, "prompt": prompt, "timeout_ms": timeout_ms})
+    def fake_worker_send(*, model, prompt, timeout_ms, max_attempts=None, retry_statuses=None):
+        calls.append({
+            "thread": threading.current_thread().name,
+            "model": model,
+            "prompt": prompt,
+            "timeout_ms": timeout_ms,
+            "max_attempts": max_attempts,
+            "retry_statuses": retry_statuses,
+        })
         return 200, b"async-worker-ok"
 
     def fail_browser_replay(*args, **kwargs):
@@ -1190,6 +1243,8 @@ def test_account_send_hooked_request_uses_native_worker_executor(tmp_path, monke
             "model": "models/gemini-3.5-flash",
             "prompt": "Reply with exactly: nexus-permission-api-ok",
             "timeout_ms": 2500,
+            "max_attempts": None,
+            "retry_statuses": (401, 403),
         }
     ]
     assert str(calls[0]["thread"]).startswith("aistudio-native-ui")
@@ -1202,8 +1257,14 @@ def test_account_streaming_request_uses_native_worker_executor(tmp_path, monkeyp
     session._auth_file = str(auth_file)
     calls = []
 
-    def fake_worker_send(*, model, prompt, timeout_ms):
-        calls.append({"model": model, "prompt": prompt, "timeout_ms": timeout_ms})
+    def fake_worker_send(*, model, prompt, timeout_ms, max_attempts=None, retry_statuses=None):
+        calls.append({
+            "model": model,
+            "prompt": prompt,
+            "timeout_ms": timeout_ms,
+            "max_attempts": max_attempts,
+            "retry_statuses": retry_statuses,
+        })
         return 200, b'[[[[[[[[null,"hello"]]]]]]]]'
 
     monkeypatch.setattr(session, "_send_native_generate_content_worker_pool_sync", fake_worker_send)
@@ -1240,6 +1301,8 @@ def test_account_streaming_request_uses_native_worker_executor(tmp_path, monkeyp
             "model": "models/gemini-3.5-flash",
             "prompt": "Reply with exactly: nexus-permission-api-ok",
             "timeout_ms": 2500,
+            "max_attempts": None,
+            "retry_statuses": (401, 403),
         }
     ]
 
@@ -1417,7 +1480,8 @@ def test_native_generate_content_probe_uses_clean_temporary_page_when_context_ex
     assert raw == b"native-ok"
     assert wire_model == "models/gemini-3.5-flash"
     assert session.goto_calls == 1
-    assert probe_page.url == AI_STUDIO_URL
+    assert probe_page.url == "https://aistudio.google.com/u/2/prompts/new_chat?model=gemini-3.5-flash"
+    assert session.goto_models[-1] == "gemini-3.5-flash"
     assert probe_page.filled_texts == ["1"]
     assert probe_page.closed is True
     assert hook_page.routed_requests == []
@@ -1440,7 +1504,8 @@ def test_native_generate_content_probe_uses_isolated_context_when_browser_exists
     assert status == 200
     assert raw == b"native-ok"
     assert wire_model == "models/gemini-3.5-flash"
-    assert probe_page.url == AI_STUDIO_URL
+    assert probe_page.url == "https://aistudio.google.com/u/2/prompts/new_chat?model=gemini-3.5-flash"
+    assert session.goto_models[-1] == "gemini-3.5-flash"
     assert probe_page.filled_texts == ["1"]
     assert probe_context.closed is True
     assert hook_page.routed_requests == []
@@ -1619,20 +1684,28 @@ class FakeModelListPage:
 
 
 class FakeTextModelSelectionPage:
-    def __init__(self, selection_result: dict | None = None):
+    def __init__(self, selection_result: dict | None = None, current_result: dict | None = None, current_after_success: dict | None = None):
         self.selection_result = selection_result or {"selected": True, "label": "Gemini 3.5 Flash"}
+        self.current_result = current_result or {"matches": False, "label": "Chat Spark Playground"}
+        self.current_after_success = current_after_success or {"matches": True, "label": "Gemini 3.5 Flash"}
         self.evaluate_calls = []
         self.wait_calls = []
         self.open_calls = 0
         self.select_calls = 0
+        self.current_calls = 0
 
     def evaluate(self, script: str, *args):
         self.evaluate_calls.append(script)
+        if script == AI_STUDIO_CURRENT_TEXT_MODEL_JS:
+            self.current_calls += 1
+            return self.current_result
         if "model_picker_not_found" in script:
             self.open_calls += 1
             return {"opened": True, "label": "Gemini 3.5 Flash"}
         if "text_model_not_found" in script:
             self.select_calls += 1
+            if self.selection_result.get("selected") is True or self.selection_result.get("reason") == "already_selected":
+                self.current_result = self.current_after_success
             return self.selection_result
         return None
 
@@ -1749,6 +1822,7 @@ def test_text_model_selection_opens_picker_and_clicks_requested_model():
 
     assert page.open_calls == 1
     assert page.select_calls == 1
+    assert page.current_calls == 2
     assert page.wait_calls == [1000, 1200]
 
 
@@ -1760,7 +1834,23 @@ def test_text_model_selection_treats_already_selected_as_ready():
 
     assert page.open_calls == 1
     assert page.select_calls == 1
+    assert page.current_calls == 2
     assert page.wait_calls == [1000]
+
+
+def test_text_model_selection_rejects_clicked_model_when_current_readback_mismatches():
+    page = FakeTextModelSelectionPage(
+        {"selected": True, "label": "Gemini 3 Flash Preview"},
+        current_result={"matches": False, "label": "Gemini 3.5 Flash"},
+        current_after_success={"matches": False, "label": "Gemini 3.5 Flash"},
+    )
+    session = BrowserSession(port=0)
+
+    assert session._select_text_model_sync(page, "gemini-3-flash-preview") is False
+
+    assert page.open_calls == 2
+    assert page.select_calls == 2
+    assert page.current_calls == 4
 
 
 def test_text_model_selection_rejects_non_boolean_selected_payload():
@@ -1815,9 +1905,11 @@ class TemplateCaptureImageSessionForTest(TemplateCaptureSessionForTest):
     def _install_hooks_sync(self, page) -> None:
         self.install_calls += 1
 
-    def _goto_aistudio_sync(self, page) -> None:
+    def _goto_aistudio_sync(self, page, **kwargs) -> None:
+        model = kwargs.get("model")
         self.goto_calls += 1
-        page.url = AI_STUDIO_URL
+        self.goto_models.append(model)
+        page.url = _aistudio_chat_url_with_model(AI_STUDIO_URL, model)
         page.has_default_makersuite = True
         page.has_textarea = True
 
@@ -1843,6 +1935,18 @@ class TextTemplateTimeoutRetrySessionForTest(TemplateCaptureImageSessionForTest)
         self.capture_calls += 1
         if self.capture_calls == 1:
             raise RuntimeError(f"template capture timeout for model={model}")
+        return {"url": page.generate_content_url, "headers": page.generate_content_headers, "body": page.generate_content_body}
+
+
+class TextTemplateSendTriggerRetrySessionForTest(TemplateCaptureImageSessionForTest):
+    def __init__(self, page):
+        super().__init__(page)
+        self.capture_calls = 0
+
+    def _capture_template_request_sync(self, page, model: str) -> dict:
+        self.capture_calls += 1
+        if self.capture_calls == 1:
+            raise RuntimeError("failed to trigger send during template capture")
         return {"url": page.generate_content_url, "headers": page.generate_content_headers, "body": page.generate_content_body}
 
 
@@ -1878,6 +1982,18 @@ def test_image_template_capture_reselects_image_model_after_timeout():
 def test_text_template_capture_reopens_page_after_timeout():
     page = FakePage(url=AI_STUDIO_URL, has_default_makersuite=True, has_textarea=True)
     session = TextTemplateTimeoutRetrySessionForTest(page)
+
+    captured = session._capture_template_sync("gemini-3-flash-preview")
+
+    assert captured["url"].endswith("GenerateContent")
+    assert session.capture_calls == 2
+    assert session.goto_calls == 1
+    assert session.install_calls == 1
+
+
+def test_text_template_capture_reopens_page_after_send_trigger_failure():
+    page = FakePage(url=AI_STUDIO_URL, has_default_makersuite=True, has_textarea=True)
+    session = TextTemplateSendTriggerRetrySessionForTest(page)
 
     captured = session._capture_template_sync("gemini-3-flash-preview")
 

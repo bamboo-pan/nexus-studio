@@ -82,14 +82,26 @@ def _configured_authuser_candidates() -> tuple[str, ...]:
     return tuple(values)
 
 
-def _aistudio_chat_urls() -> tuple[str, ...]:
-    urls = [f"https://aistudio.google.com/u/{authuser}/prompts/new_chat" for authuser in _configured_authuser_candidates()]
-    urls.extend([AI_STUDIO_URL_UNSCOPED_FALLBACK, AI_STUDIO_URL_LEGACY_FALLBACK, AI_STUDIO_HOME_URL])
+def _aistudio_chat_url_with_model(url: str, model: str | None = None) -> str:
+    model_id = str(model or "").strip().removeprefix("models/")
+    if not model_id or "new_chat" not in url:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}model={quote(model_id, safe='')}"
+
+
+def _aistudio_chat_urls(model: str | None = None) -> tuple[str, ...]:
+    urls = [_aistudio_chat_url_with_model(f"https://aistudio.google.com/u/{authuser}/prompts/new_chat", model) for authuser in _configured_authuser_candidates()]
+    urls.extend([
+        _aistudio_chat_url_with_model(AI_STUDIO_URL_UNSCOPED_FALLBACK, model),
+        _aistudio_chat_url_with_model(AI_STUDIO_URL_LEGACY_FALLBACK, model),
+        AI_STUDIO_HOME_URL,
+    ])
     return tuple(dict.fromkeys(urls))
 
 
-def _aistudio_chat_url_for_authuser(authuser: str) -> str:
-    return f"https://aistudio.google.com/u/{authuser}/prompts/new_chat"
+def _aistudio_chat_url_for_authuser(authuser: str, model: str | None = None) -> str:
+    return _aistudio_chat_url_with_model(f"https://aistudio.google.com/u/{authuser}/prompts/new_chat", model)
 
 
 def _aistudio_image_urls(model: str) -> tuple[str, ...]:
@@ -569,14 +581,34 @@ AI_STUDIO_LIST_MODELS_JS = r"""(() => {
     return Array.from(values).sort((left, right) => left.localeCompare(right));
 })()"""
 
-AI_STUDIO_OPEN_MODEL_PICKER_JS = r"""(() => {
+AI_STUDIO_OPEN_MODEL_PICKER_JS = r"""(model) => {
+    const targetModel = String(model || '').replace(/^models\//, '').toLowerCase();
     const textOf = (el) => String(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
     const visible = (el) => {
         const rect = el.getBoundingClientRect();
         const style = window.getComputedStyle(el);
         return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
     };
+    const normalize = (value) => String(value || '').toLowerCase().replace(/^models\//, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const targetLabel = normalize(targetModel);
+    const targetTokens = targetLabel.split(' ').filter(Boolean);
+    const modelValueOf = (el) => normalize([
+        el.getAttribute?.('data-value'),
+        el.getAttribute?.('data-model'),
+        el.getAttribute?.('aria-label'),
+        el.getAttribute?.('title'),
+        textOf(el),
+    ].filter(Boolean).join(' '));
+    const matchesTarget = (el) => {
+        if (!targetLabel) return false;
+        const value = modelValueOf(el);
+        if (!value) return false;
+        if (value.includes(targetModel) || value.includes(targetLabel)) return true;
+        if (targetModel === 'gemini-3.5-flash') return value.includes('gemini') && value.includes('3.5') && value.includes('flash');
+        return targetTokens.length > 0 && targetTokens.every((token) => value.includes(token));
+    };
     const isSendControl = (label) => /\b(run|send|generate)\b|运行|发送|生成/.test(label.toLowerCase());
+    const isInstructionControl = (label) => /system instructions|optional tone|style instructions|create new instruction|instruction\.*/i.test(label);
     const classOf = (el) => String(el.className || '');
     const isGenericNavigation = (el, label) => {
         const lower = label.toLowerCase();
@@ -586,28 +618,222 @@ AI_STUDIO_OPEN_MODEL_PICKER_JS = r"""(() => {
         if (/^(models|agents)$/.test(lower)) return true;
         return /featured test out|code and chat build|image generation create|video generation generate|speech and music|real-time/.test(lower);
     };
-    const modelish = (label) => /\b(?:models\/)?(?:gemini|gemma|deep-research|learnlm)-[a-z0-9][a-z0-9._-]*\b/i.test(label) || /\b(gemini|gemma|deep research|learnlm|nano banana)\b/i.test(label);
-    const clickCandidate = (candidate) => {
+    const isTextModelCategory = (label) => /code and chat|build chatbots|chatbots, agents|text generation|chat models|文本|聊天/i.test(label);
+    const hasRunSettingsAncestor = (el) => {
+        let node = el;
+        for (let depth = 0; node && node !== document.body && depth < 8; depth += 1) {
+            const label = textOf(node).toLowerCase();
+            if (label.includes('run settings') || label.includes('thinking level') || label.includes('system instructions')) return true;
+            node = node.parentElement;
+        }
+        return false;
+    };
+    const rightSide = (el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.left >= Math.max(0, window.innerWidth * 0.50);
+    };
+    const modelish = (label) => /\b(?:models\/)?(?:gemini|gemma|deep-research|learnlm)-[a-z0-9][a-z0-9._-]*\b/i.test(label)
+        || /\b(gemini|gemma|deep research|learnlm|nano banana|chat spark playground|spark playground)\b/i.test(label);
+    const pickerControlSelector = [
+        'mat-select',
+        '[role="combobox"]',
+        'button',
+        '[role="button"]',
+        '[aria-haspopup]',
+        '[aria-expanded]',
+        '[tabindex]',
+        '.selected',
+        '.active',
+        '.model-selector',
+        '.model-selector-trigger',
+        '.model-selector-button',
+        '.model-picker',
+        '.model-select',
+        '.model-display',
+        '.mat-mdc-select',
+        '.mat-mdc-menu-trigger',
+    ].join(', ');
+    const isModelSelectorCard = (candidate) => candidate.matches?.('.model-selector-card') || candidate.closest?.('.model-selector-card');
+    const nearestPickerControl = (candidate) => {
+        let fallback = null;
+        let node = candidate;
+        for (let depth = 0; node && node !== document.body && depth < 10; depth += 1) {
+            if (node.matches?.(pickerControlSelector)) return node;
+            const label = textOf(node);
+            const pointer = (() => {
+                try { return window.getComputedStyle(node).cursor === 'pointer'; } catch (e) { return false; }
+            })();
+            const clickable = pointer || node.matches?.('button, [role="button"], [role="option"], mat-option, mat-card, [tabindex], [data-value], [data-model]');
+            if (!fallback && clickable && label && label.length < 320 && !isSendControl(label) && !isInstructionControl(label) && !isGenericNavigation(node, label)) {
+                fallback = node;
+            }
+            node = node.parentElement;
+        }
+        if (fallback) return fallback;
+        return (hasRunSettingsAncestor(candidate) || rightSide(candidate)) ? candidate : null;
+    };
+    const clickCandidate = (candidate, type) => {
         const label = textOf(candidate);
         if (!visible(candidate) || candidate.disabled || candidate.getAttribute('aria-disabled') === 'true') return null;
-        if (!label || isSendControl(label) || isGenericNavigation(candidate, label)) return null;
+        if (!label || isSendControl(label) || isInstructionControl(label) || isGenericNavigation(candidate, label)) return null;
         try { candidate.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
         candidate.click();
-        return {opened: true, label: label.slice(0, 160)};
+        return {opened: true, type, label: label.slice(0, 160)};
     };
-    for (const candidate of Array.from(document.querySelectorAll('button.model-selector-card, .model-selector-card'))) {
-        const result = clickCandidate(candidate);
-        if (result) return result;
-    }
-    const candidates = Array.from(document.querySelectorAll('mat-select, [role="combobox"], button, [role="button"]'));
-    for (const candidate of candidates) {
+    const clickTextCategory = (candidate) => {
+        const label = textOf(candidate);
+        if (!visible(candidate) || candidate.disabled || candidate.getAttribute('aria-disabled') === 'true') return null;
+        if (!label || !isTextModelCategory(label)) return null;
+        try { candidate.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
+        candidate.click();
+        return {opened: true, type: 'text_category', label: label.slice(0, 160)};
+    };
+    const dedupe = (values) => Array.from(new Set(values.filter(Boolean)));
+    const pickerControls = dedupe(Array.from(document.querySelectorAll(pickerControlSelector)));
+    const currentModelControls = dedupe(
+        Array.from(document.querySelectorAll('body *'))
+            .filter((node) => {
+                const label = textOf(node);
+                return label.length > 0 && label.length < 240 && modelish(label) && !isInstructionControl(label)
+                    && !isGenericNavigation(node, label) && (hasRunSettingsAncestor(node) || rightSide(node));
+            })
+            .map(nearestPickerControl)
+    );
+    for (const candidate of currentModelControls) {
+        if (isModelSelectorCard(candidate)) continue;
         const label = textOf(candidate);
         if (!modelish(label)) continue;
-        const result = clickCandidate(candidate);
+        const result = clickCandidate(candidate, 'picker_control');
+        if (result) return result;
+    }
+    for (const candidate of pickerControls) {
+        if (isModelSelectorCard(candidate)) continue;
+        const label = textOf(candidate);
+        if (!modelish(label)) continue;
+        const result = clickCandidate(candidate, 'picker_control');
+        if (result) return result;
+    }
+    const modelTextControls = dedupe(
+        Array.from(document.querySelectorAll('body *'))
+            .filter((node) => {
+                const label = textOf(node);
+                return label.length > 0 && label.length < 240 && modelish(label) && !isInstructionControl(label);
+            })
+            .map(nearestPickerControl)
+    );
+    for (const candidate of modelTextControls) {
+        if (isModelSelectorCard(candidate)) continue;
+        const label = textOf(candidate);
+        if (!modelish(label)) continue;
+        const result = clickCandidate(candidate, 'picker_control');
+        if (result) return result;
+    }
+    if (targetLabel) {
+        for (const candidate of Array.from(document.querySelectorAll('button.model-selector-card, .model-selector-card, [data-model], [data-value]'))) {
+            if (!matchesTarget(candidate)) continue;
+            const result = clickCandidate(candidate, 'target_card');
+            if (result) return result;
+        }
+    }
+    const textCategorySelectors = 'button, [role="button"], .category-card, mat-card, [tabindex]';
+    for (const candidate of Array.from(document.querySelectorAll(textCategorySelectors))) {
+        const result = clickTextCategory(candidate);
+        if (result) return result;
+    }
+    for (const candidate of pickerControls) {
+        if (isModelSelectorCard(candidate)) continue;
+        const label = textOf(candidate);
+        if (!modelish(label)) continue;
+        const result = clickCandidate(candidate, 'picker_control');
         if (result) return result;
     }
     return {opened: false, reason: 'model_picker_not_found'};
-})()"""
+}"""
+
+AI_STUDIO_CURRENT_TEXT_MODEL_JS = r"""(model) => {
+    const targetModel = String(model || '').replace(/^models\//, '').toLowerCase();
+    const textOf = (el) => String(
+        el?.innerText ||
+        el?.textContent ||
+        el?.getAttribute?.('aria-label') ||
+        el?.getAttribute?.('title') ||
+        el?.getAttribute?.('data-value') ||
+        el?.getAttribute?.('data-model') ||
+        ''
+    ).replace(/\s+/g, ' ').trim();
+    const visible = (el) => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const normalize = (value) => String(value || '').toLowerCase().replace(/^models\//, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const targetLabel = normalize(targetModel);
+    const targetTokens = targetLabel.split(' ').filter(Boolean);
+    const modelValueOf = (el) => normalize([
+        el.getAttribute?.('data-value'),
+        el.getAttribute?.('data-model'),
+        el.getAttribute?.('aria-label'),
+        el.getAttribute?.('title'),
+        textOf(el),
+    ].filter(Boolean).join(' '));
+    const matchesTargetValue = (value) => {
+        if (!targetLabel || !value) return false;
+        if (value.includes(targetModel) || value.includes(targetLabel)) return true;
+        if (targetModel === 'gemini-3.5-flash') return value.includes('gemini') && value.includes('3.5') && value.includes('flash');
+        if (targetModel === 'gemini-3-flash-preview') return value.includes('gemini') && value.includes('3') && value.includes('flash') && value.includes('preview');
+        return targetTokens.length > 0 && targetTokens.every((token) => value.includes(token));
+    };
+    const modelish = (label) => /\b(?:models\/)?(?:gemini|gemma|deep-research|learnlm)-[a-z0-9][a-z0-9._-]*\b/i.test(label)
+        || /\b(gemini|gemma|deep research|learnlm|chat spark playground|spark playground)\b/i.test(label);
+    const badPickerText = (label) => /featured spark|code and chat build|image generation create|video generation generate|speech and music|model selector|models agents/i.test(label);
+    const hasRunSettingsAncestor = (el) => {
+        let node = el;
+        for (let depth = 0; node && node !== document.body && depth < 6; depth += 1) {
+            const label = textOf(node).toLowerCase();
+            if (label.includes('run settings') || label.includes('thinking level') || label.includes('system instructions')) return true;
+            node = node.parentElement;
+        }
+        return false;
+    };
+    const rightSide = (el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.left >= Math.max(0, window.innerWidth * 0.55);
+    };
+    const isPickerOverlayCard = (el, label) => {
+        if (badPickerText(label)) return true;
+        const card = el.closest?.('.model-selector-card, .category-card');
+        if (!card) return false;
+        return !hasRunSettingsAncestor(card) && !rightSide(card);
+    };
+    const candidates = [];
+    const seen = new Set();
+    for (const node of Array.from(document.querySelectorAll('mat-select, [role="combobox"], button, [role="button"], [aria-haspopup], [aria-expanded], .model-selector-card, .model-display, .model-selector, .mat-mdc-select, body *'))) {
+        if (!visible(node)) continue;
+        const label = textOf(node);
+        if (!label || label.length > 280 || !modelish(label)) continue;
+        if (isPickerOverlayCard(node, label)) continue;
+        const runSettings = hasRunSettingsAncestor(node);
+        const onRight = rightSide(node);
+        const controlLike = Boolean(node.matches?.('mat-select, [role="combobox"], button, [role="button"], [aria-haspopup], [aria-expanded], .model-display, .model-selector, .mat-mdc-select'));
+        if (!runSettings && !onRight && !controlLike) continue;
+        const normalized = modelValueOf(node);
+        if (!normalized || seen.has(normalized)) continue;
+        seen.add(normalized);
+        const priority = (runSettings ? 0 : 10) + (onRight ? 0 : 5) + (controlLike ? 0 : 2) + Math.min(20, Math.floor(label.length / 60));
+        candidates.push({label: label.slice(0, 180), normalized: normalized.slice(0, 180), matches: matchesTargetValue(normalized), priority});
+    }
+    candidates.sort((left, right) => left.priority - right.priority || left.label.length - right.label.length);
+    const best = candidates[0];
+    if (!best) {
+        const visibleModelLabels = Array.from(document.querySelectorAll('body *'))
+            .filter((node) => visible(node))
+            .map(textOf)
+            .filter((label) => label && label.length <= 180 && modelish(label) && !badPickerText(label))
+            .slice(0, 20);
+        return {matches: false, reason: 'current_text_model_not_found', target_model: targetModel, visible: visibleModelLabels};
+    }
+    return {matches: Boolean(best.matches), target_model: targetModel, label: best.label, normalized: best.normalized, candidates: candidates.slice(0, 10)};
+}"""
 
 AI_STUDIO_SELECT_TEXT_MODEL_JS = r"""(model) => {
     const targetModel = String(model || '').replace(/^models\//, '').toLowerCase();
@@ -630,7 +856,8 @@ AI_STUDIO_SELECT_TEXT_MODEL_JS = r"""(model) => {
     const normalize = (value) => String(value || '').toLowerCase().replace(/^models\//, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
     const targetLabel = normalize(targetModel);
     const targetTokens = targetLabel.split(' ').filter(Boolean);
-    const selectedNodes = () => Array.from(document.querySelectorAll('[aria-selected="true"], .selected, .active, .mat-mdc-option-active, [role="combobox"], mat-select'));
+    const selectedNodes = () => Array.from(document.querySelectorAll('[aria-selected="true"], .mat-mdc-option-active, [role="combobox"], mat-select'))
+        .filter((node) => !node.closest?.('.model-selector-card, .category-card'));
     const selectedText = () => selectedNodes().filter(visible).map((node) => normalize(textOf(node))).join(' ');
     const modelValueOf = (el) => normalize([
         el.getAttribute?.('data-value'),
@@ -652,13 +879,32 @@ AI_STUDIO_SELECT_TEXT_MODEL_JS = r"""(model) => {
         return {selected: false, reason: 'already_selected', label: selected.slice(0, 160)};
     }
 
-    let candidates = Array.from(document.querySelectorAll('button, [role="button"], [role="option"], mat-option, [data-value], [data-model]'));
+    const choiceSelector = 'button, [role="button"], [role="option"], mat-option, mat-card, [tabindex], [data-value], [data-model], .model-selector-card, .model-card, [class*="model"]';
+    const isGenericModelNavigation = (label) => /featured spark|code and chat build|build chatbots, agents|image generation create|video generation generate|speech and music|models agents|model selector/i.test(label);
+    const nearestModelChoice = (candidate) => {
+        let node = candidate;
+        for (let depth = 0; node && node !== document.body && depth < 8; depth += 1) {
+            if (node.matches?.(choiceSelector)) return node;
+            node = node.parentElement;
+        }
+        return candidate;
+    };
+    let candidates = Array.from(document.querySelectorAll(choiceSelector));
+    const targetTextChoices = Array.from(document.querySelectorAll('body *'))
+        .filter((node) => {
+            const label = textOf(node);
+            return label.length > 0 && label.length < 360 && matchesTarget(node) && !isGenericModelNavigation(label);
+        })
+        .map(nearestModelChoice);
+    candidates = Array.from(new Set(candidates.concat(targetTextChoices).filter(Boolean)));
     const visibleLabels = () => candidates.filter(visible).map(textOf).filter(Boolean).slice(0, 24);
     for (const candidate of candidates) {
         if (!visible(candidate) || !matchesTarget(candidate)) continue;
+        const label = textOf(candidate);
+        if (!label || label.length > 520 || isGenericModelNavigation(label)) continue;
         try { candidate.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
         candidate.click();
-        return {selected: true, label: textOf(candidate).slice(0, 160), visible: visibleLabels()};
+        return {selected: true, label: label.slice(0, 160), visible: visibleLabels()};
     }
     return {selected: false, reason: 'text_model_not_found', current: selected.slice(0, 160), visible: visibleLabels()};
 }"""
@@ -767,7 +1013,7 @@ class BrowserSession:
     async def send_hooked_request(self, *, body: str, url: str, headers: dict[str, str], timeout_ms: int) -> tuple[int, bytes]:
         if self._auth_file:
             try:
-                return await self._send_account_native_generate_content_body_async(body=body, timeout_ms=timeout_ms)
+                return await self._send_account_native_generate_content_body_async(body=body, timeout_ms=timeout_ms, retry_statuses=(401, 403))
             except _NativeUiReplayUnsupported as exc:
                 log.info("AI Studio native UI worker replay unsupported before browser replay: %s", exc)
             except RequestError:
@@ -779,9 +1025,21 @@ class BrowserSession:
             return await self._run_sync(self._send_hooked_request_sync, body, url, headers, timeout_ms, False)
         return await self._run_sync(self._send_hooked_request_sync, body, url, headers, timeout_ms)
 
-    async def send_account_native_generate_content_body(self, *, body: str, timeout_ms: int, max_attempts: int | None = None) -> tuple[int, bytes]:
+    async def send_account_native_generate_content_body(
+        self,
+        *,
+        body: str,
+        timeout_ms: int,
+        max_attempts: int | None = None,
+        retry_statuses: tuple[int, ...] | None = None,
+    ) -> tuple[int, bytes]:
         try:
-            return await self._send_account_native_generate_content_body_async(body=body, timeout_ms=timeout_ms, max_attempts=max_attempts)
+            return await self._send_account_native_generate_content_body_async(
+                body=body,
+                timeout_ms=timeout_ms,
+                max_attempts=max_attempts,
+                retry_statuses=retry_statuses,
+            )
         except RequestError:
             raise
         except NativeUiWorkerError as exc:
@@ -807,7 +1065,7 @@ class BrowserSession:
 
         if self._auth_file:
             try:
-                status, raw = await self._send_account_native_generate_content_body_async(body=body, timeout_ms=timeout_ms)
+                status, raw = await self._send_account_native_generate_content_body_async(body=body, timeout_ms=timeout_ms, retry_statuses=(401, 403))
             except _NativeUiReplayUnsupported as exc:
                 log.info("AI Studio native UI worker replay unsupported before streaming browser replay: %s", exc)
             except RequestError:
@@ -860,7 +1118,14 @@ class BrowserSession:
         async with self._botguard_lock:
             return await loop.run_in_executor(self._executor, lambda: func(*args))
 
-    async def _send_account_native_generate_content_body_async(self, *, body: str, timeout_ms: int, max_attempts: int | None = None) -> tuple[int, bytes]:
+    async def _send_account_native_generate_content_body_async(
+        self,
+        *,
+        body: str,
+        timeout_ms: int,
+        max_attempts: int | None = None,
+        retry_statuses: tuple[int, ...] | None = None,
+    ) -> tuple[int, bytes]:
         if not self._auth_file:
             raise RuntimeError("native UI worker replay requires account auth file")
         try:
@@ -871,11 +1136,22 @@ class BrowserSession:
         if max_attempts is None:
             return await loop.run_in_executor(
                 self._native_worker_executor,
-                lambda: self._send_native_generate_content_worker_pool_sync(model=model, prompt=prompt, timeout_ms=timeout_ms),
+                lambda: self._send_native_generate_content_worker_pool_sync(
+                    model=model,
+                    prompt=prompt,
+                    timeout_ms=timeout_ms,
+                    retry_statuses=retry_statuses,
+                ),
             )
         return await loop.run_in_executor(
             self._native_worker_executor,
-            lambda: self._send_native_generate_content_worker_pool_sync(model=model, prompt=prompt, timeout_ms=timeout_ms, max_attempts=max_attempts),
+            lambda: self._send_native_generate_content_worker_pool_sync(
+                model=model,
+                prompt=prompt,
+                timeout_ms=timeout_ms,
+                max_attempts=max_attempts,
+                retry_statuses=retry_statuses,
+            ),
         )
 
     def _get_captured_info(self) -> tuple[str, dict[str, str]]:
@@ -1114,16 +1390,39 @@ class BrowserSession:
             return self._send_native_generate_content_worker_pool_sync(model=model, prompt=prompt, timeout_ms=timeout_ms)
         return self._send_native_generate_content_prompt_sync(model=model, prompt=prompt, timeout_ms=timeout_ms)
 
-    def _send_native_generate_content_worker_pool_sync(self, *, model: str, prompt: str, timeout_ms: int, max_attempts: int | None = None) -> tuple[int, bytes]:
+    def _send_native_generate_content_worker_pool_sync(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        timeout_ms: int,
+        max_attempts: int | None = None,
+        retry_statuses: tuple[int, ...] | None = None,
+    ) -> tuple[int, bytes]:
         pool = self._native_worker_pool_sync()
         if max_attempts is None:
-            return pool.send(model=model, prompt=prompt, timeout_ms=timeout_ms)
-        return pool.send(model=model, prompt=prompt, timeout_ms=timeout_ms, max_attempts=max_attempts)
+            return pool.send(model=model, prompt=prompt, timeout_ms=timeout_ms, retry_statuses=retry_statuses)
+        return pool.send(model=model, prompt=prompt, timeout_ms=timeout_ms, max_attempts=max_attempts, retry_statuses=retry_statuses)
 
     def _probe_native_worker_generate_content_sync(self, *, model: str, timeout_ms: int) -> tuple[int, bytes, str]:
         pool = self._native_worker_pool_sync()
-        status, raw, metadata = pool.send_with_metadata(model=model, prompt="1", timeout_ms=timeout_ms, max_attempts=1)
-        return status, raw, str(metadata.get("wire_model") or "")
+        last_status = 0
+        last_raw = b""
+        last_wire_model = ""
+        for _ in range(max(1, pool.worker_count)):
+            status, raw, metadata = pool.send_with_metadata(
+                model=model,
+                prompt="1",
+                timeout_ms=timeout_ms,
+                max_attempts=1,
+                retry_statuses=(401, 403),
+            )
+            last_status = status
+            last_raw = raw
+            last_wire_model = str(metadata.get("wire_model") or "")
+            if status != 200:
+                return status, raw, last_wire_model
+        return last_status, last_raw, last_wire_model
 
     def _native_worker_pool_sync(self) -> NativeUiWorkerPool:
         auth_file = str(self._auth_file or "")
@@ -1185,7 +1484,7 @@ class BrowserSession:
     def _send_native_generate_content_prompt_sync(self, *, model: str, prompt: str, timeout_ms: int) -> tuple[int, bytes]:
         import time as _t
 
-        page, probe_context, close_probe_page = self._native_generate_content_probe_page_sync(fresh_chat_routes=True)
+        page, probe_context, close_probe_page = self._native_generate_content_probe_page_sync(fresh_chat_routes=True, model=model)
         response_holder: dict[str, Any] = {}
         observed_responses: list[str] = []
         target_model = str(model or "").strip().removeprefix("models/")
@@ -1338,9 +1637,9 @@ class BrowserSession:
                 except Exception:
                     pass
 
-    def _goto_native_probe_page_sync(self, page, *, fresh_chat_routes: bool = False) -> None:
+    def _goto_native_probe_page_sync(self, page, *, fresh_chat_routes: bool = False, model: str | None = None) -> None:
         if not fresh_chat_routes:
-            self._goto_aistudio_with_options_sync(page)
+            self._goto_aistudio_with_options_sync(page, model=model)
             return
 
         saved_preferred_chat_url = self._preferred_chat_url
@@ -1353,7 +1652,7 @@ class BrowserSession:
         self._last_requested_chat_url = None
         self._failed_chat_urls.clear()
         try:
-            self._goto_aistudio_with_options_sync(page)
+            self._goto_aistudio_with_options_sync(page, model=model)
             selected_preferred_chat_url = self._preferred_chat_url
             selected_last_requested_chat_url = self._last_requested_chat_url
             success = True
@@ -1367,7 +1666,7 @@ class BrowserSession:
                 self._preferred_chat_url = saved_preferred_chat_url
                 self._last_requested_chat_url = saved_last_requested_chat_url
 
-    def _native_generate_content_probe_page_sync(self, *, fresh_chat_routes: bool = False):
+    def _native_generate_content_probe_page_sync(self, *, fresh_chat_routes: bool = False, model: str | None = None):
         probe_context = None
         if self._browser is None and self._ctx is None and self._hook_page is not None:
             return self._ensure_hook_page_sync(), None, False
@@ -1375,7 +1674,7 @@ class BrowserSession:
             page = self._ctx.new_page()
             try:
                 log.info("AI Studio warmup native probe: opening clean chat page")
-                self._goto_native_probe_page_sync(page, fresh_chat_routes=fresh_chat_routes)
+                self._goto_native_probe_page_sync(page, fresh_chat_routes=fresh_chat_routes, model=model)
                 return page, None, True
             except Exception:
                 try:
@@ -1389,7 +1688,7 @@ class BrowserSession:
         page = probe_context.new_page()
         try:
             log.info("AI Studio warmup native probe: opening clean chat page in isolated context")
-            self._goto_native_probe_page_sync(page, fresh_chat_routes=fresh_chat_routes)
+            self._goto_native_probe_page_sync(page, fresh_chat_routes=fresh_chat_routes, model=model)
             return page, probe_context, False
         except Exception:
             try:
@@ -1401,7 +1700,7 @@ class BrowserSession:
     def _probe_native_generate_content_sync(self, model: str, timeout_ms: int) -> tuple[int, bytes, str]:
         import time as _t
 
-        page, probe_context, close_probe_page = self._native_generate_content_probe_page_sync()
+        page, probe_context, close_probe_page = self._native_generate_content_probe_page_sync(model=model)
         response_holder: dict[str, Any] = {}
         observed_responses: list[str] = []
 
@@ -1651,11 +1950,12 @@ class BrowserSession:
         self._install_hooks_sync(self._hook_page)
         return self._hook_page
 
-    def _chat_url_candidates(self) -> tuple[str, ...]:
-        urls = list(_aistudio_chat_urls())
-        if self._preferred_chat_url and self._preferred_chat_url in urls:
-            urls.remove(self._preferred_chat_url)
-            urls.insert(0, self._preferred_chat_url)
+    def _chat_url_candidates(self, model: str | None = None) -> tuple[str, ...]:
+        urls = list(_aistudio_chat_urls(model))
+        preferred_chat_url = _aistudio_chat_url_with_model(self._preferred_chat_url or "", model) if self._preferred_chat_url else None
+        if preferred_chat_url and preferred_chat_url in urls:
+            urls.remove(preferred_chat_url)
+            urls.insert(0, preferred_chat_url)
         return tuple(urls)
 
     def _route_candidate_for_url(self, url: str | None) -> str | None:
@@ -1955,8 +2255,9 @@ class BrowserSession:
                     self._prepare_model_onboarding_sync(page, model)
                     self._install_hooks_sync(page)
                     continue
-                if "template capture timeout" in str(exc):
-                    log.info("AI Studio template send produced no capture request; reopening before retry: %s; %s", exc, diagnostics)
+                message = str(exc).lower()
+                if "template capture timeout" in message or "failed to trigger send during template capture" in message:
+                    log.info("AI Studio template send did not produce a capture request; reopening before retry: %s; %s", exc, diagnostics)
                     self._goto_aistudio_with_options_sync(
                         page,
                         navigation_timeout_ms=navigation_timeout_ms,
@@ -2228,15 +2529,21 @@ mw:((hash) => {
         *,
         navigation_timeout_ms: int | None = None,
         chat_ready_timeout_ms: int | None = None,
+        model: str | None = None,
     ) -> None:
         if navigation_timeout_ms is None and chat_ready_timeout_ms is None:
-            self._goto_aistudio_sync(page)
+            if model is None:
+                self._goto_aistudio_sync(page)
+            else:
+                self._goto_aistudio_sync(page, model=model)
             return
-        self._goto_aistudio_sync(
-            page,
-            navigation_timeout_ms=navigation_timeout_ms or AI_STUDIO_NAVIGATION_TIMEOUT_MS,
-            chat_ready_timeout_ms=chat_ready_timeout_ms or AI_STUDIO_CHAT_READY_TIMEOUT_MS,
-        )
+        kwargs = {
+            "navigation_timeout_ms": navigation_timeout_ms or AI_STUDIO_NAVIGATION_TIMEOUT_MS,
+            "chat_ready_timeout_ms": chat_ready_timeout_ms or AI_STUDIO_CHAT_READY_TIMEOUT_MS,
+        }
+        if model is not None:
+            kwargs["model"] = model
+        self._goto_aistudio_sync(page, **kwargs)
 
     def _ensure_hook_page_with_options_sync(
         self,
@@ -2277,11 +2584,13 @@ mw:((hash) => {
         *,
         navigation_timeout_ms: int = AI_STUDIO_NAVIGATION_TIMEOUT_MS,
         chat_ready_timeout_ms: int = AI_STUDIO_CHAT_READY_TIMEOUT_MS,
+        model: str | None = None,
     ) -> None:
         import time as _t
         last_error = None
-        for url in self._chat_url_candidates():
-            if url in self._failed_chat_urls:
+        for url in self._chat_url_candidates(model):
+            route_candidate = self._route_candidate_for_url(url)
+            if url in self._failed_chat_urls or (route_candidate and route_candidate in self._failed_chat_urls):
                 continue
             route_started_at = _t.time()
             goto_error = None
@@ -2563,13 +2872,26 @@ mw:((hash) => {
         if not target_model:
             return False
         selected: dict[str, Any] | None = None
+        current: dict[str, Any] | None = None
+
+        def read_current() -> dict[str, Any] | None:
+            try:
+                raw_current = page.evaluate(AI_STUDIO_CURRENT_TEXT_MODEL_JS, target_model)
+            except Exception as exc:
+                log.debug("AI Studio current text model readback failed: %s", exc)
+                return None
+            return raw_current if isinstance(raw_current, dict) else None
+
         for attempt_index in range(2):
             try:
                 page.evaluate(DIALOG_CLEANUP_JS)
             except Exception:
                 pass
+            current = read_current()
+            if isinstance(current, dict) and current.get("matches") is True:
+                return True
             try:
-                opened = page.evaluate(AI_STUDIO_OPEN_MODEL_PICKER_JS)
+                opened = page.evaluate(AI_STUDIO_OPEN_MODEL_PICKER_JS, target_model)
                 if isinstance(opened, dict) and opened.get("opened"):
                     page.wait_for_timeout(1000)
             except Exception as exc:
@@ -2585,16 +2907,28 @@ mw:((hash) => {
             if selected.get("selected") is True:
                 log.info("AI Studio text model selected: %s", selected.get("label", target_model))
                 page.wait_for_timeout(1200)
-                return True
+                current = read_current()
+                if isinstance(current, dict) and current.get("matches") is True:
+                    return True
+                log.info("AI Studio text model readback mismatch after click: %s", current)
+                if attempt_index == 0:
+                    page.wait_for_timeout(1000)
+                    continue
             if selected.get("reason") == "already_selected":
-                return True
+                current = read_current()
+                if isinstance(current, dict) and current.get("matches") is True:
+                    return True
+                log.info("AI Studio text model already-selected readback mismatch: %s", current)
+                if attempt_index == 0:
+                    page.wait_for_timeout(1000)
+                    continue
             if attempt_index == 0 and selected.get("reason") == "text_model_not_found":
                 page.wait_for_timeout(1000)
                 continue
             break
         reason = selected.get("reason") if isinstance(selected, dict) else None
         if reason not in {"not_text_model"}:
-            log.info("AI Studio text model picker did not select %s: %s", target_model, reason)
+            log.info("AI Studio text model picker did not select %s: %s current=%s", target_model, reason, current)
         return False
 
     def _aistudio_image_urls_for_model(self, model: str) -> tuple[str, ...]:

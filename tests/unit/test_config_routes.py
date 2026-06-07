@@ -25,9 +25,11 @@ def test_config_route_lists_allowlisted_runtime_settings(tmp_path, monkeypatch):
     body = response.json()
     keys = {item["key"] for item in body["data"]}
     pure_http = next(item for item in body["data"] if item["key"] == "AISTUDIO_USE_PURE_HTTP")
+    warmup_model = next(item for item in body["data"] if item["key"] == "AISTUDIO_WARMUP_TEXT_MODEL")
     assert body["env_file"] == str(env_file.resolve())
     assert "AISTUDIO_USE_PURE_HTTP" in keys
     assert pure_http["default_value"] is False
+    assert warmup_model["default_value"] == "gemini-3-flash-preview"
     assert "跳过账号浏览器预热" in pure_http["description"]
     assert "AISTUDIO_DEFAULT_TEXT_MODEL" in keys
     assert "AISTUDIO_WARMUP_TEXT_MODEL" in keys

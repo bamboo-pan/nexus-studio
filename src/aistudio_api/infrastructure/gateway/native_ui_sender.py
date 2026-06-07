@@ -23,6 +23,7 @@ from aistudio_api.config import camoufox_proxy_identity_options, settings
 from aistudio_api.infrastructure.gateway.session import (
     AI_STUDIO_HOST,
     AI_STUDIO_HOME_URL,
+    AI_STUDIO_CURRENT_TEXT_MODEL_JS,
     AI_STUDIO_ONBOARDING_JS,
     AI_STUDIO_OPEN_MODEL_PICKER_JS,
     AI_STUDIO_SELECT_TEXT_MODEL_JS,
@@ -94,7 +95,7 @@ def _wait_for_chat_ready(page, timeout_ms: int) -> bool:
     return False
 
 
-def _open_chat(page, timeout_ms: int) -> None:
+def _open_chat(page, timeout_ms: int, model: str = "") -> None:
     failures: list[str] = []
     deadline = time.monotonic() + max(1.0, float(timeout_ms) / 1000.0)
     remaining_ms = int(max(0.0, (deadline - time.monotonic()) * 1000))
@@ -105,7 +106,7 @@ def _open_chat(page, timeout_ms: int) -> None:
             page.goto(AI_STUDIO_HOME_URL, wait_until="commit", timeout=home_timeout_ms)
         except Exception as exc:
             failures.append(f"home goto={_safe_text(exc, 120)}")
-    for url in _aistudio_chat_urls():
+    for url in _aistudio_chat_urls(model):
         remaining_ms = int(max(0.0, (deadline - time.monotonic()) * 1000))
         if remaining_ms <= 0:
             break
@@ -161,6 +162,7 @@ def _select_model(page, model: str, timeout_ms: int) -> None:
         return
     selected: dict[str, object] | None = None
     opened: dict[str, object] | None = None
+    current: dict[str, object] | None = None
     select_error: BaseException | None = None
     deadline = time.monotonic() + min(45.0, max(15.0, float(timeout_ms) / 1000.0 * 0.35))
     attempt_index = 0
@@ -169,17 +171,35 @@ def _select_model(page, model: str, timeout_ms: int) -> None:
         page.evaluate(DIALOG_CLEANUP_JS)
     except Exception:
         pass
+    def opened_picker(value: dict[str, object] | None) -> bool:
+        return bool(isinstance(value, dict) and value.get("opened") and value.get("type") not in {"target_card", "text_category"})
+
+    def read_current() -> dict[str, object] | None:
+        try:
+            raw_current = page.evaluate(AI_STUDIO_CURRENT_TEXT_MODEL_JS, model)
+        except Exception:
+            return None
+        return raw_current if isinstance(raw_current, dict) else None
+
     while time.monotonic() < deadline:
         attempt_index += 1
+        current = read_current()
+        if isinstance(current, dict):
+            _trace_stage("select_model.current", attempt=attempt_index, result=current)
+            if current.get("matches") is True:
+                return
         if not picker_open:
             try:
-                raw_opened = page.evaluate(AI_STUDIO_OPEN_MODEL_PICKER_JS)
+                raw_opened = page.evaluate(AI_STUDIO_OPEN_MODEL_PICKER_JS, model)
                 if isinstance(raw_opened, dict):
                     opened = raw_opened
                     _trace_stage("select_model.open_picker", attempt=attempt_index, result=opened)
-                    if opened.get("opened"):
+                    if opened_picker(opened):
                         picker_open = True
                         page.wait_for_timeout(_MODEL_PICKER_OPEN_WAIT_MS)
+                    elif opened.get("opened"):
+                        page.wait_for_timeout(_MODEL_PICKER_OPEN_WAIT_MS)
+                        continue
             except Exception:
                 pass
         try:
@@ -192,16 +212,24 @@ def _select_model(page, model: str, timeout_ms: int) -> None:
             _trace_stage("select_model.result", attempt=attempt_index, result=selected)
             if selected.get("selected") is True:
                 page.wait_for_timeout(2500)
-                return
+                current = read_current()
+                _trace_stage("select_model.current_after_click", attempt=attempt_index, result=current)
+                if isinstance(current, dict) and current.get("matches") is True:
+                    return
+                picker_open = False
             if selected.get("reason") == "already_selected":
-                return
+                current = read_current()
+                _trace_stage("select_model.current_after_already_selected", attempt=attempt_index, result=current)
+                if isinstance(current, dict) and current.get("matches") is True:
+                    return
+                picker_open = False
             if selected.get("reason") == "not_text_model":
                 break
-            if selected.get("reason") == "text_model_not_found" and opened and opened.get("opened"):
+            if selected.get("reason") == "text_model_not_found" and opened_picker(opened):
                 picker_open = True
         delay_ms = min(2500, 1000 + attempt_index * 250)
         page.wait_for_timeout(delay_ms)
-    diagnostics = f"result={_safe_text(selected, 220)} opened={_safe_text(opened, 180)}"
+    diagnostics = f"result={_safe_text(selected, 220)} current={_safe_text(current, 220)} opened={_safe_text(opened, 180)}"
     if select_error is not None:
         diagnostics += f" select_error={type(select_error).__name__}: {_safe_text(select_error, 160)}"
     raise RuntimeError(f"AI Studio text model not selected in native UI sender: {model}; {diagnostics}")
@@ -338,7 +366,7 @@ def _send_on_page(page, *, model: str, prompt: str, timeout_ms: int) -> dict[str
     page.on("response", on_response)
     try:
         _trace_stage("send.start", model=model, timeout_ms=timeout_ms)
-        _open_chat(page, _open_chat_timeout_ms(timeout_ms))
+        _open_chat(page, _open_chat_timeout_ms(timeout_ms), model)
         _trace_stage("send.chat_ready", model=model)
         _select_model(page, model, timeout_ms)
         _trace_stage("send.model_selected", model=model)

@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.responses import RedirectResponse
+from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -42,6 +43,11 @@ GENERATE_CONTENT_AUTH_HEALTH_REASON = (
     "AI Studio GenerateContent returned an authorization failure; re-login or import the "
     "browser session for the Google account that can generate in AI Studio after the page fully loads."
 )
+ACCOUNT_WARMUP_FAILURE_HEALTH_REASON = (
+    "AI Studio startup warmup could not complete a real GenerateContent probe for this account; "
+    "verify the account can open the requested model in AI Studio or import a fresh browser session."
+)
+ACCOUNT_WARMUP_FAILURE_ISOLATION_SECONDS = 300
 
 
 def _is_validation_error(exc: BaseException) -> bool:
@@ -82,6 +88,7 @@ def _is_transient_warmup_error(exc: BaseException) -> bool:
     readiness_markers = (
         "ai studio chat runtime not ready",
         "ai studio image runtime not ready",
+        "failed to trigger send during template capture",
     )
     if any(marker in message for marker in readiness_markers):
         return True
@@ -107,6 +114,13 @@ def _warmup_retry_delay(attempt: int, backoff_seconds: tuple[float, ...]) -> flo
 def _record_account_warmup_failure(account_store: Any, account_id: str, exc: BaseException) -> None:
     if isinstance(exc, AuthError):
         account_store.isolate_account(account_id, GENERATE_CONTENT_AUTH_HEALTH_REASON)
+        return
+    if not _is_transient_warmup_error(exc):
+        account_store.isolate_account(
+            account_id,
+            ACCOUNT_WARMUP_FAILURE_HEALTH_REASON,
+            ACCOUNT_WARMUP_FAILURE_ISOLATION_SECONDS,
+        )
 
 
 async def _warmup_with_retries(
@@ -147,6 +161,32 @@ def _should_start_account_pool_warmup(*, use_pure_http: bool, account_count: int
     return not use_pure_http and account_count > 0 and warmup_limit > 0
 
 
+def _is_account_pool_warmup_candidate(account: Any) -> bool:
+    return not getattr(account, "is_isolated", False)
+
+
+def _account_pool_warmup_required_success_count(accounts: list[Any], warmup_limit: int) -> int:
+    if warmup_limit <= 0:
+        return 0
+    candidate_count = sum(1 for account in accounts if _is_account_pool_warmup_candidate(account))
+    return min(warmup_limit, candidate_count)
+
+
+def _account_pool_warmup_status(
+    *,
+    completed_accounts: list[str],
+    failed_accounts: list[str],
+    required_success_count: int,
+) -> str:
+    if required_success_count <= 0:
+        return "failed" if failed_accounts and not completed_accounts else "complete"
+    if len(completed_accounts) >= required_success_count:
+        return "complete"
+    if failed_accounts:
+        return "partial" if completed_accounts else "failed"
+    return "running"
+
+
 def _account_pool_warmup_account_ids(
     accounts: list[Any],
     *,
@@ -157,14 +197,14 @@ def _account_pool_warmup_account_ids(
     if warmup_limit <= 0:
         return []
 
-    available = [account for account in accounts if not getattr(account, "is_isolated", False)]
+    available = [account for account in accounts if _is_account_pool_warmup_candidate(account)]
     if not available:
         return []
 
     candidates: list[str] = []
 
     def add(account: Any | None) -> None:
-        if account is None or len(candidates) >= warmup_limit:
+        if account is None:
             return
         account_id = str(getattr(account, "id", "") or "")
         if account_id and account_id not in candidates:
@@ -175,6 +215,8 @@ def _account_pool_warmup_account_ids(
 
     add(available[0])
     add(next((account for account in available if getattr(account, "is_premium", False)), None))
+    for account in available:
+        add(account)
     return candidates
 
 
@@ -305,11 +347,21 @@ async def lifespan(app: FastAPI):
             pool = runtime_state.account_client_pool
             if pool is None:
                 return
+            required_success_count = _account_pool_warmup_required_success_count(
+                account_store.list_accounts(),
+                settings.account_warmup_limit,
+            )
             for account_id in account_warmup_ids:
+                if len(runtime_state.warmup_completed_accounts) >= required_success_count:
+                    break
                 try:
                     account_client = await pool.get_client(account_id)
                     if account_client is None:
                         runtime_state.warmup_failed_accounts = [*runtime_state.warmup_failed_accounts, account_id]
+                        required_success_count = _account_pool_warmup_required_success_count(
+                            account_store.list_accounts(),
+                            settings.account_warmup_limit,
+                        )
                         continue
                     warmup_account = getattr(account_client, "warmup_account_text_native", None)
                     if not callable(warmup_account):
@@ -324,10 +376,15 @@ async def lifespan(app: FastAPI):
                     runtime_state.warmup_failed_accounts = [*runtime_state.warmup_failed_accounts, account_id]
                     _record_account_warmup_failure(account_store, account_id, e)
                     logger.warning("Account browser warmup failed for account=%s: %s", account_id, e)
-            if runtime_state.warmup_failed_accounts:
-                runtime_state.warmup_status = "partial" if runtime_state.warmup_completed_accounts else "failed"
-            else:
-                runtime_state.warmup_status = "complete"
+                required_success_count = _account_pool_warmup_required_success_count(
+                    account_store.list_accounts(),
+                    settings.account_warmup_limit,
+                )
+            runtime_state.warmup_status = _account_pool_warmup_status(
+                completed_accounts=runtime_state.warmup_completed_accounts,
+                failed_accounts=runtime_state.warmup_failed_accounts,
+                required_success_count=required_success_count,
+            )
 
         if account_warmup_ids:
             runtime_state.warmup_status = "running"
@@ -594,6 +651,11 @@ app.mount(
 @app.get("/")
 async def root():
     return RedirectResponse(url="/static/index.html")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return Response(status_code=204)
 
 
 def main():

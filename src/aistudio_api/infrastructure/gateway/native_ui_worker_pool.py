@@ -254,8 +254,22 @@ class NativeUiWorkerPool:
             self._available.put(worker)
         log.info("AI Studio native UI worker pool ready: auth_hash=%s worker_count=%s", self.auth_hash, worker_count)
 
-    def send(self, *, model: str, prompt: str, timeout_ms: int, max_attempts: int | None = None) -> tuple[int, bytes]:
-        status, raw, _metadata = self.send_with_metadata(model=model, prompt=prompt, timeout_ms=timeout_ms, max_attempts=max_attempts)
+    def send(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        timeout_ms: int,
+        max_attempts: int | None = None,
+        retry_statuses: Sequence[int] | None = None,
+    ) -> tuple[int, bytes]:
+        status, raw, _metadata = self.send_with_metadata(
+            model=model,
+            prompt=prompt,
+            timeout_ms=timeout_ms,
+            max_attempts=max_attempts,
+            retry_statuses=retry_statuses,
+        )
         return status, raw
 
     def send_with_metadata(
@@ -265,6 +279,7 @@ class NativeUiWorkerPool:
         prompt: str,
         timeout_ms: int,
         max_attempts: int | None = None,
+        retry_statuses: Sequence[int] | None = None,
     ) -> tuple[int, bytes, dict[str, object]]:
         if self._closed:
             raise NativeUiWorkerProcessError("native UI worker pool is closed")
@@ -277,8 +292,11 @@ class NativeUiWorkerPool:
         timeout_seconds = max(60.0, float(timeout_ms) / 1000.0 + 90.0)
         deadline = time.monotonic() + timeout_seconds
         last_error: BaseException | None = None
+        last_retry_response: tuple[int, bytes, dict[str, object]] | None = None
         attempts = max(1, int(max_attempts)) if max_attempts is not None else max(2, self.worker_count)
-        for _ in range(attempts):
+        retry_status_set = {int(status) for status in (retry_statuses or ())}
+        status_attempts_per_worker = 2 if retry_status_set else 1
+        for attempt_index in range(attempts):
             try:
                 worker = self._lease_worker(deadline)
             except NativeUiWorkerTimeoutError as exc:
@@ -288,18 +306,42 @@ class NativeUiWorkerPool:
                     log.warning("Native UI worker pool budget exhausted while waiting for retry worker; last_error=%s", last_error)
                 break
             try:
-                result = worker.send(payload, timeout_seconds=max(1.0, deadline - time.monotonic()))
-                status, raw = self._decode_result(result)
-                log.info(
-                    "AI Studio native UI worker replay matched response: auth_hash=%s worker=%s status=%s wire_model=%s body_size=%s url_path=%s",
-                    self.auth_hash,
-                    getattr(worker, "index", "?"),
-                    status,
-                    result.get("wire_model") or "",
-                    result.get("body_size") or len(raw),
-                    result.get("url_path") or "",
-                )
-                return status, raw, dict(result)
+                for status_attempt_index in range(status_attempts_per_worker):
+                    result = worker.send(payload, timeout_seconds=max(1.0, deadline - time.monotonic()))
+                    status, raw = self._decode_result(result)
+                    log.info(
+                        "AI Studio native UI worker replay matched response: auth_hash=%s worker=%s status=%s wire_model=%s body_size=%s url_path=%s",
+                        self.auth_hash,
+                        getattr(worker, "index", "?"),
+                        status,
+                        result.get("wire_model") or "",
+                        result.get("body_size") or len(raw),
+                        result.get("url_path") or "",
+                    )
+                    if status not in retry_status_set:
+                        return status, raw, dict(result)
+                    last_retry_response = (status, raw, dict(result))
+                    if status_attempt_index + 1 < status_attempts_per_worker:
+                        log.warning(
+                            "AI Studio native UI worker returned retryable status; retrying same worker context: auth_hash=%s worker=%s status=%s pool_attempt=%s/%s status_attempt=%s/%s",
+                            self.auth_hash,
+                            getattr(worker, "index", "?"),
+                            status,
+                            attempt_index + 1,
+                            attempts,
+                            status_attempt_index + 1,
+                            status_attempts_per_worker,
+                        )
+                        continue
+                    if attempt_index + 1 < attempts:
+                        log.warning(
+                            "AI Studio native UI worker returned retryable status: auth_hash=%s worker=%s status=%s attempt=%s/%s",
+                            self.auth_hash,
+                            getattr(worker, "index", "?"),
+                            status,
+                            attempt_index + 1,
+                            attempts,
+                        )
             except NativeUiWorkerRequestError as exc:
                 last_error = exc
                 if _request_error_requires_restart(exc):
@@ -319,6 +361,8 @@ class NativeUiWorkerPool:
                 log.warning("Restarted native UI worker after protocol/process failure: %s", exc)
             finally:
                 self._release_worker(worker)
+        if last_retry_response is not None:
+            return last_retry_response
         if last_error is not None:
             if isinstance(last_error, NativeUiWorkerRequestError):
                 raise NativeUiWorkerRequestError(f"native UI worker pool request failed after retry: {last_error}") from last_error

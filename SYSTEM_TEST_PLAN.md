@@ -22,6 +22,7 @@
 
 * 所有 P0/P1 用例都在 WSL 临时目录的新副本中运行，不能直接污染开发工作区。
 * 测试环境必须与开发环境分离。系统测试只能从干净临时副本执行，并记录源 commit、临时副本 commit、`git status --porcelain`、依赖安装命令和数据目录；任何直接在开发工作区、带未提交补丁的工作区、或复用开发数据目录跑出的结果都只能算诊断，不能声明通过。
+* P0/P1 provider 集成路径必须使用本计划指定的真实凭据并真实通过：Google AI Studio 使用真实账号目录，OpenAI-compatible 使用真实 key 文件。假 token、stub provider、本地 mock upstream、空账号目录、只验证凭据文件存在或只跑单元测试，都只能算诊断/开发辅助，不能把对应 API/UI/系统用例标记为通过。
 * 每个真实用户路径必须同时有 API 级验证和浏览器 UI 级验证。
 * Playwright 浏览器 UI 测试必须通过 MCP browser tools 可见执行：测试人员必须能看到页面导航、点击、输入、模型选择、发送、等待、错误/完成状态和截图/快照证据。纯 headless Playwright 脚本可作为批量自动化补充，但不能单独替代 P0/P1 UI 通过依据。
 * UI 测试必须像真实用户一样操作可见控件。禁止把 `page.evaluate()`、Alpine/DOM 状态注入、localStorage 预置、静态 DOM 存在性检查或直接调用内部 JS 方法当作用户路径通过标准；这些只能在用户路径失败后作为诊断手段，并且诊断结果不得覆盖用户路径失败结论。
@@ -118,7 +119,8 @@ Google AI Studio 账号态文本路径必须测量用户可感知延迟，而不
 | --- | --- |
 | WSL 工作目录 | 在 `/home/bamboo` 下新建临时目录，例如 `/home/bamboo/nexus-studio-system-test-YYYYMMDD-HHMMSS` |
 | Google AI Studio 凭据 | 使用 `AGENTS.md` 指定的真实账号目录：Windows `\\wsl.localhost\Ubuntu-24.04\home\bamboo\nexus-studio\data\accounts`，WSL `/home/bamboo/nexus-studio/data/accounts` |
-| OpenAI-compatible key | Windows `C:\Users\bamboo\Documents\github\key.txt`，WSL `/mnt/c/Users/bamboo/Documents/github/key.txt` |
+| OpenAI-compatible key | Windows `C:\Users\bamboo\Documents\github\key.txt`，WSL `/mnt/c/Users/bamboo/Documents/github/key.txt`；真实文件格式为第一条非空行 Base URL、第二条非空行 token，或显式 `OPENAI_BASE_URL=...` / `OPENAI_API_KEY=...`；测试脚本必须解析 Base URL + token 后真实调用上游，不能把 Base URL 当 token，也不能只检查文件存在。 |
+| 真实凭据通过门禁 | Google AI Studio 和 OpenAI-compatible 的 P0/P1 provider 用例必须分别用上面真实账号目录和真实 key 文件完成模型加载、至少一次真实上游请求、对应浏览器 UI 用户路径和 request-log 脱敏断言；报告必须包含脱敏证据（凭据路径、文件非空/账号数、模型/请求 group id、状态码/错误摘要），不得打印或提交真实 token/cookie/storage state。凭据缺失、不可读、上游未真实调用或只用 mock/stub 替代时，本轮系统测试不能标记通过。 |
 | 浏览器 | Playwright/Camoufox 可启动真实 WebUI；UI 测试需截图和 console/network 记录 |
 | 主机 UI 测试 | 服务必须在 WSL 临时副本中启动，浏览器必须从 Windows 主机 Playwright 打开 `http://127.0.0.1:<port>/static/index.html#studio` 并实际操作 UI；只跑 WSL 内 API、只打开静态文件、或只验证 DOM 加载都不能替代 UI 系统测试 |
 | WSL 网络与 Camoufox 预检 | 启动服务前必须在同一 WSL 临时副本和 venv 中证明 `urllib.request.urlopen("https://aistudio.google.com/")` 成功，且 Camoufox `page.goto("https://aistudio.google.com/", wait_until="commit")` 成功；直连超时、代理 CONNECT 后 TLS 断流、`NS_ERROR_NET_INTERRUPT` 或 `about:blank` 必须写入 `network-preflight.safe.json` 并让系统测试以 `network_preflight_unavailable` 失败，不能继续启动服务后把环境问题伪装成 native worker、Local Studio 或账号不可用 |
@@ -179,10 +181,11 @@ PY
 python main.py
 ```
 
-读取 OpenAI key 时只在测试进程内读取，禁止打印：
+读取 OpenAI-compatible 凭据时只在测试进程内读取，禁止打印。真实文件支持第一条非空行 Base URL、第二条非空行 token，或显式 `OPENAI_BASE_URL=...` / `OPENAI_API_KEY=...`：
 
 ```bash
-OPENAI_COMPAT_API_KEY="$(tr -d '\r\n' < "$OPENAI_COMPAT_KEY_FILE")"
+OPENAI_COMPAT_BASE_URL="$(grep -m1 -E '^(https?://|OPENAI_BASE_URL=)' "$OPENAI_COMPAT_KEY_FILE" | sed 's/^OPENAI_BASE_URL=//' | tr -d '\r')"
+OPENAI_COMPAT_API_KEY="$(grep -m1 -E '^(sk-|OPENAI_API_KEY=|Bearer )' "$OPENAI_COMPAT_KEY_FILE" | sed -e 's/^OPENAI_API_KEY=//' -e 's/^Bearer //' | tr -d '\r')"
 ```
 
 ## 覆盖维度
@@ -469,6 +472,7 @@ Provider Manager 是 provider-model 池的控制面，不是 Local Studio 会话
 
 * P0 全部通过；P1 不通过项必须有明确 bug 编号、日志、截图和请求记录 group id。
 * `ENV-01` 到 `ENV-04` 必须全部通过；任何开发工作区运行、脏工作区运行、临时补丁后运行、复用开发数据目录或连接旧开发服务的结果都不能标记 `SYSTEM_TEST_PASS`。
+* 真实凭据门禁必须通过；Google AI Studio 账号态路径和 OpenAI-compatible 路径必须分别使用真实凭据完成真实 API 与真实 UI 用户路径，且 request log 证明发生了真实上游调用并完成脱敏。任何假凭据、mock provider、stub upstream、只检查 key 文件存在、或只用单元测试覆盖 provider 集成都不能标记 `SYSTEM_TEST_PASS`。
 * 没有未捕获 ASGI 异常、浏览器 console error 或 Playwright 页面崩溃。
 * 所有成功路径都能在 UI 中看到用户可理解结果，并在 API/request log 中看到对应请求。
 * 所有失败路径都是受控失败，且服务继续可用。

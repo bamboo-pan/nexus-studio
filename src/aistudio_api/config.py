@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DEFAULT_TEXT_MODEL = os.getenv("AISTUDIO_DEFAULT_TEXT_MODEL", "gemma-4-31b-it")
-DEFAULT_WARMUP_TEXT_MODEL = os.getenv("AISTUDIO_WARMUP_TEXT_MODEL", "gemini-3.5-flash")
+DEFAULT_WARMUP_TEXT_MODEL = os.getenv("AISTUDIO_WARMUP_TEXT_MODEL", "gemini-3-flash-preview")
 DEFAULT_IMAGE_MODEL = os.getenv("AISTUDIO_DEFAULT_IMAGE_MODEL", "gemini-3.1-flash-image-preview")
 DEFAULT_CAMOUFOX_PORT = 9222
 DEFAULT_RUNTIME_DATA_DIR = Path(__file__).resolve().parents[2] / "data"

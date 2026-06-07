@@ -80,8 +80,8 @@ class FakeAccountNativeSession:
         self.response_body = response_body or TEXT_RESPONSE_RAW.encode("utf-8")
         self.calls = []
 
-    async def send_account_native_generate_content_body(self, *, body, timeout_ms, max_attempts=None):
-        self.calls.append({"body": body, "timeout_ms": timeout_ms, "max_attempts": max_attempts})
+    async def send_account_native_generate_content_body(self, *, body, timeout_ms, max_attempts=None, retry_statuses=None):
+        self.calls.append({"body": body, "timeout_ms": timeout_ms, "max_attempts": max_attempts, "retry_statuses": retry_statuses})
         return 200, self.response_body
 
 
@@ -171,7 +171,8 @@ def test_account_text_generate_content_uses_native_worker_before_capture(monkeyp
     assert sent_body[0] == "models/gemini-3.5-flash"
     assert sent_body[1][0][0][0][1] == "Reply with exactly: native-first-ok"
     assert session.calls[0]["timeout_ms"] > 0
-    assert session.calls[0]["max_attempts"] == 1
+    assert session.calls[0]["max_attempts"] is None
+    assert session.calls[0]["retry_statuses"] == (401, 403)
 
 
 def test_account_text_stream_uses_native_worker_before_capture(monkeypatch):
@@ -197,7 +198,8 @@ def test_account_text_stream_uses_native_worker_before_capture(monkeypatch):
     assert events[:2] == [("body", "native text ok"), ("usage", {"prompt_tokens": 1, "completion_tokens": 3, "total_tokens": 4, "cached_tokens": None, "prompt_tokens_details": None, "completion_tokens_details": {"reasoning_tokens": 0, "visible_tokens": 3}})]
     assert events[-1] == ("done", None)
     assert len(session.calls) == 1
-    assert session.calls[0]["max_attempts"] == 1
+    assert session.calls[0]["max_attempts"] is None
+    assert session.calls[0]["retry_statuses"] == (401, 403)
 
 
 def test_account_text_stream_timeout_uses_request_budget_not_warmup_probe(monkeypatch):
@@ -220,7 +222,8 @@ def test_account_text_stream_timeout_uses_request_budget_not_warmup_probe(monkey
 
     assert events[0] == ("body", "native text ok")
     assert session.calls[0]["timeout_ms"] == 120000
-    assert session.calls[0]["max_attempts"] == 1
+    assert session.calls[0]["max_attempts"] is None
+    assert session.calls[0]["retry_statuses"] == (401, 403)
 
 
 def test_account_generate_content_with_tools_keeps_captured_replay(monkeypatch):

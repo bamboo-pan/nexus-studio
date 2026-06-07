@@ -764,7 +764,7 @@ class AIStudioClient:
         status, raw = await session.send_account_native_generate_content_body(
             body=body,
             timeout_ms=self._account_native_request_timeout_ms(settings.timeout_replay),
-            max_attempts=1,
+            retry_statuses=(401, 403),
         )
         raw_text = raw.decode("utf-8", errors="replace")
         if status != 200:
@@ -781,7 +781,7 @@ class AIStudioClient:
         status, raw = await session.send_account_native_generate_content_body(
             body=body,
             timeout_ms=self._account_native_request_timeout_ms(settings.timeout_stream),
-            max_attempts=1,
+            retry_statuses=(401, 403),
         )
         raw_text = raw.decode("utf-8", errors="replace")
         if status != 200:

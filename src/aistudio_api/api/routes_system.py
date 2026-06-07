@@ -51,7 +51,7 @@ CONFIG_CATEGORIES = (
 CONFIG_OPTIONS: tuple[ConfigOption, ...] = (
     ConfigOption("AISTUDIO_USE_PURE_HTTP", "Pure HTTP 模式", "runtime", "运行模式", "bool", False, "启用实验性纯 HTTP 请求路径；开启后不启动浏览器，也会跳过账号浏览器预热。", "use_pure_http"),
     ConfigOption("AISTUDIO_DEFAULT_TEXT_MODEL", "默认文本模型", "runtime", "运行模式", "string", "gemma-4-31b-it", "CLI 和内部默认文本模型。"),
-    ConfigOption("AISTUDIO_WARMUP_TEXT_MODEL", "预热文本模型", "runtime", "运行模式", "string", "gemini-3.5-flash", "启动账号浏览器预热时用于捕获可复用文本请求模板的模型。"),
+    ConfigOption("AISTUDIO_WARMUP_TEXT_MODEL", "预热文本模型", "runtime", "运行模式", "string", "gemini-3-flash-preview", "启动账号浏览器预热时用于捕获可复用文本请求模板的模型。"),
     ConfigOption("AISTUDIO_DEFAULT_IMAGE_MODEL", "默认图片模型", "runtime", "运行模式", "string", "gemini-3.1-flash-image-preview", "未显式指定时使用的图片模型。"),
     ConfigOption("AISTUDIO_MAX_CONCURRENCY", "最大并发", "runtime", "运行模式", "int", 3, "后端请求并发信号量大小。", "max_concurrency", minimum=1, maximum=100),
     ConfigOption("AISTUDIO_NATIVE_UI_WORKERS_PER_ACCOUNT", "账号 Native UI worker 数", "runtime", "运行模式", "int", 3, "每个账号可复用的独立 Native UI worker 进程数；用于账号态文本生成，保持干净进程隔离并支持同账号并发。", "native_ui_workers_per_account", minimum=1, maximum=20),
