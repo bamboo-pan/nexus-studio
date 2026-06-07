@@ -265,3 +265,66 @@ status, raw = self._send_native_generate_content_worker_pool_sync(
 )
 return status, raw
 ```
+
+---
+
+## Scenario: Real System Test Environment And Visible UI Oracles
+
+### 1. Scope / Trigger
+- Trigger: Changes that touch account-backed generation, gateway routing/replay, browser automation, Local Studio UI, request logs, provider/model selection, or system-test scripts.
+- Scope: `SYSTEM_TEST_PLAN.md`, WSL real-system smoke scripts, MCP/Playwright UI verification, native AI Studio UI worker warmup, and Local Studio user-facing workflows.
+
+### 2. Signatures
+- Required report artifacts: `artifacts/mcp-visible-ui-results.json`, `artifacts/performance-comparison-results.json`, `artifacts/api-results.json`, `artifacts/ui-results.json`, `artifacts/server.log`.
+- Required environment evidence files: `source-commit.txt`, `source-status.txt`, `test-copy-commit.txt`, `test-copy-status.txt`.
+- Required data-directory env keys: `AISTUDIO_LOCAL_STUDIO_DIR`, `AISTUDIO_REQUEST_LOGS_DIR`, `AISTUDIO_GENERATED_IMAGES_DIR`, `AISTUDIO_IMAGE_SESSIONS_DIR`, `AISTUDIO_PROVIDER_MANAGER_DIR`.
+
+### 3. Contracts
+- Full real system tests must run from a fresh WSL temporary copy, not the developer workspace or a reused dev server.
+- The temporary copy must preserve enough Git metadata to record commit and clean-status evidence.
+- Writable test data directories must point under the current run root. Account edit/delete tests must use a copied account directory, never the source real credential directory.
+- P0/P1 UI pass evidence must include a visible MCP browser-tool user path: navigation, clicks, input, model/provider selection, send, visible wait state, final visible result/error, snapshot or screenshot, console summary, and network summary.
+- Direct DOM/Alpine mutation, `page.evaluate()` state injection, localStorage preloading, static DOM checks, or API-only success can be diagnostic aids only. They cannot replace user-path UI pass evidence.
+- Google AI Studio account-backed text tests must compare Local Studio user-visible first-token and completion latency against direct official AI Studio web UI in the same network/account/model class.
+
+### 4. Validation & Error Matrix
+- Dirty source or test copy -> system test fails before service startup.
+- Service command started from the developer workspace or connects to an old dev server -> system test fails.
+- P0/P1 UI result has no MCP-visible user path evidence -> UI coverage is incomplete and system test fails.
+- UI path succeeds only after internal state injection -> mark `diagnostic_pass_after_patch` or diagnostic-only, not `SYSTEM_TEST_PASS`.
+- Official AI Studio direct UI is unreachable -> mark environment/model-selection blocker; do not declare Local Studio latency pass.
+- Local Studio first-token or completion latency exceeds `SYSTEM_TEST_PLAN.md` budget -> performance failure even if final text is correct.
+
+### 5. Good/Base/Bad Cases
+- Good: A WSL run creates `/home/bamboo/nexus-studio-system-test-*`, installs a fresh venv, starts the service from that copy, uses MCP browser tools to perform Local Studio user actions, records request-log group ids, and emits `SYSTEM_TEST_PASS` only after all P0 gates pass.
+- Base: A headless Playwright script supplements MCP-visible UI coverage with bulk assertions, but the report still identifies the corresponding visible MCP path.
+- Bad: A script sets Alpine fields with `page.evaluate()`, clicks send, and claims this proves the provider/model picker user path works.
+- Bad: A local temporary code patch makes a smoke pass, but the clean checkout is never rerun.
+
+### 6. Tests Required
+- Documentation/system-plan updates: run `git diff --check` and markdown diagnostics for changed docs.
+- System-test harness updates: add hard-fail assertions for every expected/oracle field recorded in result JSON.
+- Account/gateway/UI code updates: run unit tests plus WSL clean-copy API and MCP-visible UI real-system tests as required by `SYSTEM_TEST_PLAN.md`.
+- Performance-sensitive Google text changes: record official AI Studio direct UI and Local Studio UI first-token/completion samples in `performance-comparison-results.json`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+```python
+await page.evaluate("""
+() => {
+	const root = document.querySelector('[x-data]')._x_dataStack[0]
+	root.localStudioProviderId = 'google-ai-studio'
+	root.localStudioModel = 'gemini-3.5-flash'
+}
+""")
+mark_ui_passed()
+```
+
+#### Correct
+```text
+Use MCP browser tools to open the WSL Local Studio URL, click the visible provider selector,
+choose Google AI Studio, open the visible model selector, choose the requested model, send
+the prompt, record the first visible assistant token, completion state, screenshot/snapshot,
+console/network summary, and request-log group id.
+```
