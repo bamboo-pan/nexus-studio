@@ -197,3 +197,36 @@ Redesigned the system test plan around clean WSL test environments, MCP-visible 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: System test bug fixes
+
+**Date**: 2026-06-08
+**Task**: System test bug fixes
+**Branch**: `feature/system-test-bug-fixes-20260607`
+
+### Summary
+
+Fixed AI Studio system-test regressions around official model selection, native UI worker 401/403 recovery, worker warmup, OpenAI-compatible model-list retry, and real-test reporting. Full unit suite passed; latest WSL diagnostic remains incomplete because Local Studio Google performance budget and full plan matrix coverage still fail.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `68959d8` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
