@@ -3,8 +3,10 @@ import json
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from aistudio_api.application import api_service
+from aistudio_api.api.app import app
 from aistudio_api.application.api_service import stats_response
 from aistudio_api.api.responses import (
     chat_completion_response,
@@ -15,6 +17,12 @@ from aistudio_api.api.responses import (
     to_gemini_usage_metadata,
 )
 from aistudio_api.api.state import runtime_state
+
+
+def test_favicon_route_avoids_browser_console_404():
+    response = TestClient(app).get("/favicon.ico")
+
+    assert response.status_code == 204
 
 
 def test_sse_chunk_includes_null_usage_when_requested():

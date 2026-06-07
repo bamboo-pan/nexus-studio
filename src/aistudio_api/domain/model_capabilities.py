@@ -261,7 +261,7 @@ def _image_model(
     )
 
 
-PREFERRED_TEXT_MODEL_IDS = ("gemini-3.5-flash", "gemini-3-flash-preview", "gemma-4-31b-it")
+PREFERRED_TEXT_MODEL_IDS = ("gemini-3-flash-preview", "gemini-3.5-flash", "gemma-4-31b-it")
 
 
 MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {

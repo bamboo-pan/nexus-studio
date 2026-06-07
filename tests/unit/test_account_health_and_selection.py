@@ -8,8 +8,11 @@ import pytest
 from fastapi import FastAPI, HTTPException
 
 from aistudio_api.api.app import (
+    ACCOUNT_WARMUP_FAILURE_HEALTH_REASON,
     GENERATE_CONTENT_AUTH_HEALTH_REASON,
     _account_pool_warmup_account_ids,
+    _account_pool_warmup_required_success_count,
+    _account_pool_warmup_status,
     _is_transient_warmup_error,
     _record_account_warmup_failure,
     _run_account_startup_preflight,
@@ -92,7 +95,7 @@ def test_account_pool_warmup_candidates_cover_balanced_and_premium(tmp_path):
         active_account_id=free.id,
         rotation_mode="round_robin",
         warmup_limit=1,
-    ) == [free.id]
+    ) == [free.id, premium.id]
 
 
 def test_account_pool_warmup_candidates_prefer_active_in_round_robin(tmp_path):
@@ -135,6 +138,37 @@ def test_account_pool_warmup_candidates_skip_isolated_accounts(tmp_path):
     ) == [premium.id]
 
 
+def test_account_pool_warmup_status_requires_success_for_current_candidates(tmp_path):
+    store = AccountStore(accounts_dir=tmp_path)
+    failed = store.save_account("failed", None, storage_state(cookie_name="sid1"), activate=True)
+    ready = store.save_account("ready", None, storage_state(cookie_name="sid2"), activate=False)
+
+    required = _account_pool_warmup_required_success_count(store.list_accounts(), warmup_limit=2)
+
+    assert required == 2
+    assert _account_pool_warmup_status(
+        completed_accounts=[ready.id],
+        failed_accounts=[failed.id],
+        required_success_count=required,
+    ) == "partial"
+
+
+def test_account_pool_warmup_status_completes_after_failed_account_is_isolated(tmp_path):
+    store = AccountStore(accounts_dir=tmp_path)
+    failed = store.save_account("failed", None, storage_state(cookie_name="sid1"), activate=True)
+    ready = store.save_account("ready", None, storage_state(cookie_name="sid2"), activate=False)
+    store.isolate_account(failed.id, "GenerateContent permission failed")
+
+    required = _account_pool_warmup_required_success_count(store.list_accounts(), warmup_limit=2)
+
+    assert required == 1
+    assert _account_pool_warmup_status(
+        completed_accounts=[ready.id],
+        failed_accounts=[failed.id],
+        required_success_count=required,
+    ) == "complete"
+
+
 def test_warmup_retry_classifies_navigation_timeout_only_as_transient():
     timeout = RuntimeError(
         'Page.goto: Timeout 60000ms exceeded. navigating to "https://aistudio.google.com/", waiting until "commit"'
@@ -142,6 +176,7 @@ def test_warmup_retry_classifies_navigation_timeout_only_as_transient():
 
     assert _is_transient_warmup_error(timeout) is True
     assert _is_transient_warmup_error(RuntimeError("template capture timeout for model=gemini-3.1-flash-lite")) is True
+    assert _is_transient_warmup_error(RuntimeError("failed to trigger send during template capture")) is True
     assert _is_transient_warmup_error(RuntimeError("BotGuardService capture timeout")) is True
     assert _is_transient_warmup_error(RuntimeError("AI Studio chat runtime not ready after navigating to https://aistudio.google.com/")) is True
     assert _is_transient_warmup_error(RuntimeError("Google sign-in auth state is missing or invalid")) is False
@@ -198,6 +233,21 @@ def test_account_warmup_auth_failure_isolates_account_with_actionable_reason(tmp
     assert refreshed.health_status == "isolated"
     assert refreshed.is_isolated is True
     assert refreshed.health_reason == GENERATE_CONTENT_AUTH_HEALTH_REASON
+    assert "sid1" not in refreshed.health_reason
+
+
+def test_account_warmup_hard_failure_isolates_account_with_actionable_reason(tmp_path):
+    store = AccountStore(accounts_dir=tmp_path)
+    account = store.save_account("main", None, storage_state(cookie_name="sid1"))
+
+    _record_account_warmup_failure(store, account.id, RuntimeError("AI Studio text model not selected: text_model_not_found"))
+
+    refreshed = store.get_account(account.id)
+    assert refreshed.health_status == "isolated"
+    assert refreshed.is_isolated is True
+    assert refreshed.isolated_until is not None
+    assert datetime.fromisoformat(refreshed.isolated_until) > datetime.now(timezone.utc)
+    assert refreshed.health_reason == ACCOUNT_WARMUP_FAILURE_HEALTH_REASON
     assert "sid1" not in refreshed.health_reason
 
 

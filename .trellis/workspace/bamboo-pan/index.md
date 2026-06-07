@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 5
-- **Last Active**: 2026-06-07
+- **Total Sessions**: 6
+- **Last Active**: 2026-06-08
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~199 | Active |
+| `journal-1.md` | ~232 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 6 | 2026-06-08 | System test bug fixes | `68959d8` | `feature/system-test-bug-fixes-20260607` |
 | 5 | 2026-06-07 | Strengthen Playwright UI system test plan | `85e66b4` | `feature/strengthen-ui-system-test-plan` |
 | 4 | 2026-06-07 | Fix native UI worker WSL startup | `38ca90f` | `feature/fix-native-ui-worker-wsl-system-test` |
 | 3 | 2026-06-06 | Fix account deletion and health readiness | `62cc22b`, `0cbc132` | `feature/fix-account-delete-and-relogin-tests` |

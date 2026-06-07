@@ -50,6 +50,15 @@ class FlakyNavigationBrowserSession(FakeBrowserSession):
         return await super().capture_template(model, **kwargs)
 
 
+class FlakyTemplateSendBrowserSession(FakeBrowserSession):
+    async def capture_template(self, model, **kwargs):
+        if not self.template_calls:
+            self.template_calls.append(model)
+            self.template_kwargs.append(kwargs)
+            raise RuntimeError("failed to trigger send during template capture")
+        return await super().capture_template(model, **kwargs)
+
+
 class AlwaysTimeoutWarmupSession(FakeBrowserSession):
     def __init__(self):
         super().__init__()
@@ -192,6 +201,17 @@ def test_capture_template_cache_can_be_cleared():
 
 def test_capture_template_retries_transient_aistudio_navigation_failure():
     session = FlakyNavigationBrowserSession()
+    service = RequestCaptureService(session, SnapshotCache(ttl=60, max_size=10))
+
+    captured = asyncio.run(service.capture("hello", model="gemini-3.1-flash-lite"))
+
+    assert captured.headers["x-template-call"] == "2"
+    assert session.template_calls == ["gemini-3.1-flash-lite", "gemini-3.1-flash-lite"]
+    assert session.template_kwargs == [{}, {}]
+
+
+def test_capture_template_retries_transient_send_trigger_failure():
+    session = FlakyTemplateSendBrowserSession()
     service = RequestCaptureService(session, SnapshotCache(ttl=60, max_size=10))
 
     captured = asyncio.run(service.capture("hello", model="gemini-3.1-flash-lite"))
@@ -447,13 +467,13 @@ def test_client_warmup_fails_when_native_probe_sends_different_model():
     client = AIStudioClient(port=1)
     original_session = client._session
     try:
-        session = NativeProbeWarmupSession([(200, b"ok", "models/gemini-3-flash-preview")])
+        session = NativeProbeWarmupSession([(200, b"ok", "models/gemini-3.5-flash")])
         capture_service = WarmupCaptureService()
         client._session = session
         client._capture_service = capture_service
         client._replay_service = WarmupReplayService()
 
-        with pytest.raises(AuthError, match="instead of models/gemini-3.5-flash"):
+        with pytest.raises(AuthError, match=f"instead of models/{DEFAULT_WARMUP_TEXT_MODEL}"):
             asyncio.run(client.warmup())
 
         assert session.ensure_context_calls == []

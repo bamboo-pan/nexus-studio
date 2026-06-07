@@ -19,7 +19,13 @@ def _is_transient_aistudio_capture_error(exc: BaseException) -> bool:
     message = str(exc)
     if "Google sign-in" in message or "auth state" in message:
         return False
-    return "Page.goto: Timeout" in message or "AI Studio chat runtime not ready" in message or "AI Studio image runtime not ready" in message or "template capture timeout" in message
+    return (
+        "Page.goto: Timeout" in message
+        or "AI Studio chat runtime not ready" in message
+        or "AI Studio image runtime not ready" in message
+        or "template capture timeout" in message
+        or "failed to trigger send during template capture" in message
+    )
 
 
 @dataclass

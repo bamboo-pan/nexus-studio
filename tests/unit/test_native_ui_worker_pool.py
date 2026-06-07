@@ -245,6 +245,70 @@ def test_native_ui_worker_pool_retries_request_failure_across_configured_workers
     assert [worker.restarts for worker in workers] == [0, 0, 0]
 
 
+def test_native_ui_worker_pool_retries_configured_status_across_workers():
+    workers = []
+
+    class FakeWorker:
+        def __init__(self, *, index, command=None, env=None):
+            self.index = index
+            self.calls = 0
+            self.restarts = 0
+            workers.append(self)
+
+        def send(self, payload, *, timeout_seconds):
+            self.calls += 1
+            if self.index == 0:
+                return _result(b"permission denied", status=403)
+            return _result(b"second-worker-ok")
+
+        def restart(self):
+            self.restarts += 1
+
+        def close(self):
+            pass
+
+    pool = NativeUiWorkerPool(auth_file="/tmp/auth.json", worker_count=2, worker_factory=FakeWorker)
+
+    status, raw = pool.send(model="models/gemini-3.5-flash", prompt="retry", timeout_ms=1000, retry_statuses=(401, 403))
+
+    assert (status, raw) == (200, b"second-worker-ok")
+    assert [worker.calls for worker in workers] == [2, 1]
+    assert [worker.restarts for worker in workers] == [0, 0]
+
+
+def test_native_ui_worker_pool_retries_configured_status_on_same_worker_first():
+    workers = []
+
+    class FakeWorker:
+        def __init__(self, *, index, command=None, env=None):
+            self.index = index
+            self.calls = 0
+            self.restarts = 0
+            workers.append(self)
+
+        def send(self, payload, *, timeout_seconds):
+            self.calls += 1
+            if self.index == 0 and self.calls == 1:
+                return _result(b"first permission denied", status=403)
+            if self.index == 0:
+                return _result(b"same-worker-ok")
+            raise AssertionError("next worker should not be leased after same-context recovery")
+
+        def restart(self):
+            self.restarts += 1
+
+        def close(self):
+            pass
+
+    pool = NativeUiWorkerPool(auth_file="/tmp/auth.json", worker_count=2, worker_factory=FakeWorker)
+
+    status, raw = pool.send(model="models/gemini-3.5-flash", prompt="retry", timeout_ms=1000, retry_statuses=(401, 403))
+
+    assert (status, raw) == (200, b"same-worker-ok")
+    assert [worker.calls for worker in workers] == [2, 0]
+    assert [worker.restarts for worker in workers] == [0, 0]
+
+
 def test_native_ui_worker_pool_preserves_last_worker_error_when_retry_budget_expires(monkeypatch):
     monotonic_values = iter([1000.0, 1001.0, 1002.0, 2000.0])
     monkeypatch.setattr(worker_pool_module.time, "monotonic", lambda: next(monotonic_values, 2000.0))
