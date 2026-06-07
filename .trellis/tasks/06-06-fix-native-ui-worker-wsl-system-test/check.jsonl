@@ -1,0 +1,3 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend guideline index for final quality verification."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Native worker pool test obligations and real WSL system-test oracle."}
+{"file":".trellis/tasks/06-06-fix-native-ui-worker-wsl-system-test/research/native-worker-import-path.md","reason":"Verification context for the reported missing-module failure."}

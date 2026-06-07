@@ -58,6 +58,9 @@
 | Google AI Studio 凭据 | 使用 `AGENTS.md` 指定的真实账号目录：Windows `\\wsl.localhost\Ubuntu-24.04\home\bamboo\nexus-studio\data\accounts`，WSL `/home/bamboo/nexus-studio/data/accounts` |
 | OpenAI-compatible key | Windows `C:\Users\bamboo\Documents\github\key.txt`，WSL `/mnt/c/Users/bamboo/Documents/github/key.txt` |
 | 浏览器 | Playwright/Camoufox 可启动真实 WebUI；UI 测试需截图和 console/network 记录 |
+| 主机 UI 测试 | 服务必须在 WSL 临时副本中启动，浏览器必须从 Windows 主机 Playwright 打开 `http://127.0.0.1:<port>/static/index.html#studio` 并实际操作 UI；只跑 WSL 内 API、只打开静态文件、或只验证 DOM 加载都不能替代 UI 系统测试 |
+| WSL 网络与 Camoufox 预检 | 启动服务前必须在同一 WSL 临时副本和 venv 中证明 `urllib.request.urlopen("https://aistudio.google.com/")` 成功，且 Camoufox `page.goto("https://aistudio.google.com/", wait_until="commit")` 成功；直连超时、代理 CONNECT 后 TLS 断流、`NS_ERROR_NET_INTERRUPT` 或 `about:blank` 必须写入 `network-preflight.safe.json` 并让系统测试以 `network_preflight_unavailable` 失败，不能继续启动服务后把环境问题伪装成 native worker、Local Studio 或账号不可用 |
+| Native UI worker 预检 | 启动服务前必须在 WSL 临时副本中用同一 venv 做 worker import/start preflight：模拟 `python main.py` 的 source-tree 入口导入 `NativeUiWorker`，再启动 `python -m aistudio_api.infrastructure.gateway.native_ui_sender --worker` 子进程并确认未因 `ModuleNotFoundError: No module named 'aistudio_api'` 退出；账号启动 warmup 的真实 `GenerateContent` probe 必须读取 `AISTUDIO_WARMUP_PROBE_TIMEOUT_SECONDS` 冷启动预算；`pip install -e .` 成功或 `/api/local-studio/health` 200 都不能替代此预检 |
 | WSL 资源 | 浏览器密集型 API+UI+worker pool 系统测试需要可用 swap；若 `dmesg` 出现 `Out of memory: Killed process ... chrome-headless` 或 UI 阶段日志为空，先调整 `.wslconfig`（例如 `memory=4GB`、`swap=4GB`）并 `wsl --shutdown` 后重跑，不能把 OOM 误判为应用通过或失败 |
 | 服务端口 | 优先使用临时端口，例如 `18080`，避免和本机开发服务冲突 |
 | 数据目录 | 为每次测试设置独立 `AISTUDIO_LOCAL_STUDIO_DIR`、`AISTUDIO_REQUEST_LOGS_DIR`、`AISTUDIO_GENERATED_IMAGES_DIR`、`AISTUDIO_IMAGE_SESSIONS_DIR` |
@@ -84,6 +87,26 @@ export AISTUDIO_GENERATED_IMAGES_DIR="$RUN_ROOT/data/generated-images"
 export AISTUDIO_IMAGE_SESSIONS_DIR="$RUN_ROOT/data/image-sessions"
 export AISTUDIO_PROVIDER_MANAGER_DIR="$RUN_ROOT/data/provider-manager"
 export OPENAI_COMPAT_KEY_FILE=/mnt/c/Users/bamboo/Documents/github/key.txt
+python - <<'PY'
+import os
+import sys
+import time
+from pathlib import Path
+
+repo = Path.cwd()
+sys.path.insert(0, str(repo / "src"))
+from aistudio_api.infrastructure.gateway.native_ui_worker_pool import NativeUiWorker
+
+worker_env = os.environ.copy()
+worker_env.pop("PYTHONPATH", None)
+worker = NativeUiWorker(index=0, env=worker_env)
+process = worker._ensure_started()
+time.sleep(2)
+if process.poll() is not None:
+	raise SystemExit(f"NATIVE_WORKER_PREFLIGHT_FAIL code={process.returncode} stderr={worker._stderr_summary()}")
+worker.close()
+print("NATIVE_WORKER_PREFLIGHT_OK")
+PY
 python main.py
 ```
 
@@ -346,16 +369,17 @@ Provider Manager 是 provider-model 池的控制面，不是 Local Studio 会话
 
 ## 执行顺序
 
-1. 启动 WSL 临时环境，确认 health/model/account 预检通过。
-2. 开启 request logs。
-3. 判定 Provider Manager / shared provider-model pool rollout phase，执行 `PM-ROLL-00`，并为尚未进入的阶段记录带证据的 `not_applicable`。
-4. 执行 API 级 P0 smoke，先验证 provider/model/chat/search/image/reasoning 基础链路。
-5. 执行浏览器 P0 Local Studio 矩阵，覆盖 bug 专项和架构契约断言。
-6. 如果当前代码已进入 Phase 1/2/3，执行对应 `PM-CP-*`、`PM-DP-*`、`PM-PROTO-*`、`PM-RT-*` 和 `PM-AUDIT-*` 门禁。
-7. 执行 P1 UI 状态、会话、无结果缓存回归、附件、基础模块回归和 provider/reasoning 隔离用例。
-8. 汇总 `architecture-contract-results` 与 `provider-manager-phase-gate-results`，逐项标记每条架构契约断言的 pass/fail/not_applicable。
-9. 导出必要请求记录和截图到本次临时目录的 `artifacts/`，检查脱敏后再附到人工报告；不要提交。
-10. 清理临时服务、浏览器进程和临时数据目录。
+1. 启动 WSL 临时环境前先运行 Native UI worker import/start preflight；该预检必须使用同一 venv、清空外部 `PYTHONPATH`，并从源码入口导入父进程模块后启动 worker 子进程。
+2. 启动 WSL 临时环境，确认 health/model/account 预检通过。
+3. 开启 request logs。
+4. 判定 Provider Manager / shared provider-model pool rollout phase，执行 `PM-ROLL-00`，并为尚未进入的阶段记录带证据的 `not_applicable`。
+5. 执行 API 级 P0 smoke，先验证 provider/model/chat/search/image/reasoning 基础链路；Google 账号态文本 API smoke 必须确认 server.log 中出现 native worker pool ready/start/matched-response 证据，且没有 `ModuleNotFoundError: No module named 'aistudio_api'`。
+6. 从 Windows 主机 Playwright 打开 WSL 服务的真实 WebUI，执行浏览器 P0 Local Studio 矩阵，覆盖 bug 专项和架构契约断言；不能用 WSL 内 headless API smoke 或静态 DOM 检查替代主机 UI 操作。
+7. 如果当前代码已进入 Phase 1/2/3，执行对应 `PM-CP-*`、`PM-DP-*`、`PM-PROTO-*`、`PM-RT-*` 和 `PM-AUDIT-*` 门禁。
+8. 执行 P1 UI 状态、会话、无结果缓存回归、附件、基础模块回归和 provider/reasoning 隔离用例。
+9. 汇总 `architecture-contract-results` 与 `provider-manager-phase-gate-results`，逐项标记每条架构契约断言的 pass/fail/not_applicable。
+10. 导出必要请求记录和截图到本次临时目录的 `artifacts/`，检查脱敏后再附到人工报告；不要提交。
+11. 清理临时服务、浏览器进程和临时数据目录。
 
 ## 通过门禁
 
@@ -363,6 +387,8 @@ Provider Manager 是 provider-model 池的控制面，不是 Local Studio 会话
 * 没有未捕获 ASGI 异常、浏览器 console error 或 Playwright 页面崩溃。
 * 所有成功路径都能在 UI 中看到用户可理解结果，并在 API/request log 中看到对应请求。
 * 所有失败路径都是受控失败，且服务继续可用。
+* WSL Native UI worker import/start preflight 必须通过；server.log 不得出现 worker 子进程 `ModuleNotFoundError: No module named 'aistudio_api'`、`Error while finding module specification for 'aistudio_api.infrastructure.gateway.native_ui_sender'` 或以 `/api/local-studio/health` 成功掩盖 worker 不可用的情况。
+* 主机 Playwright UI 测试必须实际连接 WSL 服务并完成 Local Studio 用户操作；测试报告需包含 UI 断言、console/network 摘要和截图路径。没有主机 UI 阶段或 UI 阶段为空，本轮系统测试结论必须为失败或不完整。
 * Google AI Studio 账号态文本路径必须证明 native UI worker pool 生效：配置值可查询、重复请求未每次启动新 helper、同账号并发可以租用多个 worker、worker 失败会重启，且 native UI 匹配到的 `401/403/429` 不被 raw replay 覆盖。
 * 所有适用的架构契约断言必须通过；`not_applicable` 必须有明确原因，不能用于掩盖未覆盖路径。
 * Provider Manager / shared provider-model pool 阶段门禁必须通过：Phase 0 要证明当前 Local Studio 兼容基线未回归；Phase 1/2/3 一旦有对应实现入口，对应控制面、数据面、协议适配、路由/fallback 和审计安全断言不得整体跳过。

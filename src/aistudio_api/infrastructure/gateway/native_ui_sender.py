@@ -22,6 +22,7 @@ from camoufox.sync_api import Camoufox
 from aistudio_api.config import camoufox_proxy_identity_options, settings
 from aistudio_api.infrastructure.gateway.session import (
     AI_STUDIO_HOST,
+    AI_STUDIO_HOME_URL,
     AI_STUDIO_ONBOARDING_JS,
     AI_STUDIO_OPEN_MODEL_PICKER_JS,
     AI_STUDIO_SELECT_TEXT_MODEL_JS,
@@ -31,6 +32,11 @@ from aistudio_api.infrastructure.gateway.session import (
 )
 
 warnings.filterwarnings("ignore", message="When using a proxy, it is heavily recommended that you pass `geoip=True`.*")
+
+_OPEN_CHAT_GOTO_TIMEOUT_MS = 45_000
+_OPEN_CHAT_MAX_TIMEOUT_MS = 180_000
+_OPEN_CHAT_INTERRUPTED_READY_WAIT_MS = 12_000
+_MODEL_PICKER_OPEN_WAIT_MS = 2_000
 
 
 def _browser_options() -> dict[str, object]:
@@ -53,6 +59,13 @@ def _safe_text(value: object, limit: int = 240) -> str:
     text = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[email]", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:limit]
+
+
+def _trace_stage(stage: str, **details: object) -> None:
+    parts = [f"stage={stage}"]
+    for key, value in details.items():
+        parts.append(f"{key}={_safe_text(value, 120)}")
+    print("native_ui_sender " + " ".join(parts), file=sys.stderr, flush=True)
 
 
 def _url_path(url: str) -> str:
@@ -83,19 +96,64 @@ def _wait_for_chat_ready(page, timeout_ms: int) -> bool:
 
 def _open_chat(page, timeout_ms: int) -> None:
     failures: list[str] = []
-    for url in _aistudio_chat_urls():
+    deadline = time.monotonic() + max(1.0, float(timeout_ms) / 1000.0)
+    remaining_ms = int(max(0.0, (deadline - time.monotonic()) * 1000))
+    if remaining_ms > 0:
+        home_timeout_ms = min(remaining_ms, _OPEN_CHAT_GOTO_TIMEOUT_MS)
+        _trace_stage("open_chat.prime_home", timeout_ms=home_timeout_ms, remaining_ms=remaining_ms)
         try:
-            page.goto(url, wait_until="commit", timeout=timeout_ms)
+            page.goto(AI_STUDIO_HOME_URL, wait_until="commit", timeout=home_timeout_ms)
         except Exception as exc:
-            failures.append(f"{_url_path(url)} goto={_safe_text(exc, 120)}")
+            failures.append(f"home goto={_safe_text(exc, 120)}")
+    for url in _aistudio_chat_urls():
+        remaining_ms = int(max(0.0, (deadline - time.monotonic()) * 1000))
+        if remaining_ms <= 0:
+            break
+        url_path = _url_path(url)
+        goto_timeout_ms = min(remaining_ms, _OPEN_CHAT_GOTO_TIMEOUT_MS)
+        _trace_stage("open_chat.goto", url_path=url_path, timeout_ms=goto_timeout_ms, remaining_ms=remaining_ms)
+        try:
+            page.goto(url, wait_until="commit", timeout=goto_timeout_ms)
+        except Exception as exc:
+            failures.append(f"{url_path} goto={_safe_text(exc, 120)}")
+            current_path = _url_path(getattr(page, "url", ""))
+            remaining_ms = int(max(0.0, (deadline - time.monotonic()) * 1000))
+            if remaining_ms <= 0:
+                break
+            if "accounts.google.com" in str(getattr(page, "url", "")):
+                failures.append(f"{url_path} redirected_to_signin")
+                _trace_stage("open_chat.signin_redirect", url_path=url_path)
+                continue
+            interrupted_ready_wait_ms = min(remaining_ms, _OPEN_CHAT_INTERRUPTED_READY_WAIT_MS)
+            _trace_stage(
+                "open_chat.goto_interrupted",
+                url_path=url_path,
+                current_path=current_path,
+                ready_wait_ms=interrupted_ready_wait_ms,
+            )
+            if _wait_for_chat_ready(page, interrupted_ready_wait_ms):
+                _trace_stage("open_chat.ready", current_path=_url_path(getattr(page, "url", "")), after="goto_interrupted")
+                return
+            failures.append(f"{url_path} interrupted_not_ready current={current_path}")
             continue
         if "accounts.google.com" in str(getattr(page, "url", "")):
-            failures.append(f"{_url_path(url)} redirected_to_signin")
+            failures.append(f"{url_path} redirected_to_signin")
+            _trace_stage("open_chat.signin_redirect", url_path=url_path)
             continue
-        if _wait_for_chat_ready(page, timeout_ms):
+        remaining_ms = int(max(0.0, (deadline - time.monotonic()) * 1000))
+        if remaining_ms <= 0:
+            break
+        if _wait_for_chat_ready(page, remaining_ms):
+            _trace_stage("open_chat.ready", current_path=_url_path(getattr(page, "url", "")))
             return
-        failures.append(f"{_url_path(url)} not_ready current={_url_path(getattr(page, 'url', ''))}")
-    raise RuntimeError(f"AI Studio chat runtime not ready in native UI sender: {failures[:4]}")
+        current_path = _url_path(getattr(page, "url", ""))
+        failures.append(f"{url_path} not_ready current={current_path}")
+        _trace_stage("open_chat.not_ready", url_path=url_path, current_path=current_path)
+    raise RuntimeError(f"AI Studio chat runtime not ready in native UI sender after {timeout_ms}ms: {failures[:4]}")
+
+
+def _open_chat_timeout_ms(timeout_ms: int) -> int:
+    return min(max(1, int(timeout_ms)), _OPEN_CHAT_MAX_TIMEOUT_MS)
 
 
 def _select_model(page, model: str, timeout_ms: int) -> None:
@@ -106,20 +164,24 @@ def _select_model(page, model: str, timeout_ms: int) -> None:
     select_error: BaseException | None = None
     deadline = time.monotonic() + min(45.0, max(15.0, float(timeout_ms) / 1000.0 * 0.35))
     attempt_index = 0
+    picker_open = False
+    try:
+        page.evaluate(DIALOG_CLEANUP_JS)
+    except Exception:
+        pass
     while time.monotonic() < deadline:
         attempt_index += 1
-        try:
-            page.evaluate(DIALOG_CLEANUP_JS)
-        except Exception:
-            pass
-        try:
-            raw_opened = page.evaluate(AI_STUDIO_OPEN_MODEL_PICKER_JS)
-            if isinstance(raw_opened, dict):
-                opened = raw_opened
-                if opened.get("opened"):
-                    page.wait_for_timeout(1200)
-        except Exception:
-            pass
+        if not picker_open:
+            try:
+                raw_opened = page.evaluate(AI_STUDIO_OPEN_MODEL_PICKER_JS)
+                if isinstance(raw_opened, dict):
+                    opened = raw_opened
+                    _trace_stage("select_model.open_picker", attempt=attempt_index, result=opened)
+                    if opened.get("opened"):
+                        picker_open = True
+                        page.wait_for_timeout(_MODEL_PICKER_OPEN_WAIT_MS)
+            except Exception:
+                pass
         try:
             raw_selected = page.evaluate(AI_STUDIO_SELECT_TEXT_MODEL_JS, model)
         except Exception as exc:
@@ -127,6 +189,7 @@ def _select_model(page, model: str, timeout_ms: int) -> None:
             raw_selected = None
         if isinstance(raw_selected, dict):
             selected = raw_selected
+            _trace_stage("select_model.result", attempt=attempt_index, result=selected)
             if selected.get("selected") is True:
                 page.wait_for_timeout(2500)
                 return
@@ -134,6 +197,8 @@ def _select_model(page, model: str, timeout_ms: int) -> None:
                 return
             if selected.get("reason") == "not_text_model":
                 break
+            if selected.get("reason") == "text_model_not_found" and opened and opened.get("opened"):
+                picker_open = True
         delay_ms = min(2500, 1000 + attempt_index * 250)
         page.wait_for_timeout(delay_ms)
     diagnostics = f"result={_safe_text(selected, 220)} opened={_safe_text(opened, 180)}"
@@ -272,11 +337,16 @@ def _send_on_page(page, *, model: str, prompt: str, timeout_ms: int) -> dict[str
 
     page.on("response", on_response)
     try:
-        _open_chat(page, min(timeout_ms, 90_000))
+        _trace_stage("send.start", model=model, timeout_ms=timeout_ms)
+        _open_chat(page, _open_chat_timeout_ms(timeout_ms))
+        _trace_stage("send.chat_ready", model=model)
         _select_model(page, model, timeout_ms)
+        _trace_stage("send.model_selected", model=model)
         _fill_prompt(page, prompt)
+        _trace_stage("send.prompt_filled")
         if not _click_run(page):
             raise RuntimeError("run button not found in native UI sender")
+        _trace_stage("send.clicked_run")
         deadline = time.time() + max(1.0, timeout_ms / 1000)
         while time.time() < deadline:
             if response_holder:
@@ -286,6 +356,7 @@ def _send_on_page(page, *, model: str, prompt: str, timeout_ms: int) -> dict[str
             raise RuntimeError(str(response_holder["error"]))
         if not response_holder:
             raise RuntimeError(f"native UI sender timeout; observed={observed[:5]}")
+        _trace_stage("send.response_matched", status=response_holder.get("status"), url_path=response_holder.get("url_path"))
         return response_holder
     finally:
         try:
@@ -347,15 +418,18 @@ class NativeUiSenderWorker:
 
     def _ensure_context(self, auth_file: str):
         if self._browser is None:
+            _trace_stage("context.open_browser")
             self._cf = Camoufox(**_browser_options())
             self._browser = self._cf.__enter__()
         if self._context is not None and self._auth_file == auth_file:
+            _trace_stage("context.reuse")
             return self._context
         if self._context is not None:
             try:
                 self._context.close()
             except Exception:
                 pass
+        _trace_stage("context.new")
         self._context = self._browser.new_context(storage_state=auth_file, service_workers="block")
         self._auth_file = auth_file
         return self._context

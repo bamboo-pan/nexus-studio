@@ -687,6 +687,10 @@ class BrowserSession:
         self._last_requested_chat_url: str | None = None
         self._failed_chat_urls: set[str] = set()
 
+    @property
+    def has_account_auth(self) -> bool:
+        return bool(self._auth_file)
+
     async def ensure_context(
         self,
         *,
@@ -775,6 +779,16 @@ class BrowserSession:
             return await self._run_sync(self._send_hooked_request_sync, body, url, headers, timeout_ms, False)
         return await self._run_sync(self._send_hooked_request_sync, body, url, headers, timeout_ms)
 
+    async def send_account_native_generate_content_body(self, *, body: str, timeout_ms: int, max_attempts: int | None = None) -> tuple[int, bytes]:
+        try:
+            return await self._send_account_native_generate_content_body_async(body=body, timeout_ms=timeout_ms, max_attempts=max_attempts)
+        except RequestError:
+            raise
+        except NativeUiWorkerError as exc:
+            raise _native_worker_unavailable_error(exc) from exc
+        except Exception as exc:
+            raise _native_worker_unavailable_error(exc) from exc
+
     async def probe_native_generate_content(self, *, model: str, timeout_ms: int) -> tuple[int, bytes, str]:
         return await self._run_sync(self._probe_native_generate_content_sync, model, timeout_ms)
 
@@ -846,7 +860,7 @@ class BrowserSession:
         async with self._botguard_lock:
             return await loop.run_in_executor(self._executor, lambda: func(*args))
 
-    async def _send_account_native_generate_content_body_async(self, *, body: str, timeout_ms: int) -> tuple[int, bytes]:
+    async def _send_account_native_generate_content_body_async(self, *, body: str, timeout_ms: int, max_attempts: int | None = None) -> tuple[int, bytes]:
         if not self._auth_file:
             raise RuntimeError("native UI worker replay requires account auth file")
         try:
@@ -854,9 +868,14 @@ class BrowserSession:
         except Exception as exc:
             raise _NativeUiReplayUnsupported(str(exc)) from exc
         loop = asyncio.get_running_loop()
+        if max_attempts is None:
+            return await loop.run_in_executor(
+                self._native_worker_executor,
+                lambda: self._send_native_generate_content_worker_pool_sync(model=model, prompt=prompt, timeout_ms=timeout_ms),
+            )
         return await loop.run_in_executor(
             self._native_worker_executor,
-            lambda: self._send_native_generate_content_worker_pool_sync(model=model, prompt=prompt, timeout_ms=timeout_ms),
+            lambda: self._send_native_generate_content_worker_pool_sync(model=model, prompt=prompt, timeout_ms=timeout_ms, max_attempts=max_attempts),
         )
 
     def _get_captured_info(self) -> tuple[str, dict[str, str]]:
@@ -1095,13 +1114,15 @@ class BrowserSession:
             return self._send_native_generate_content_worker_pool_sync(model=model, prompt=prompt, timeout_ms=timeout_ms)
         return self._send_native_generate_content_prompt_sync(model=model, prompt=prompt, timeout_ms=timeout_ms)
 
-    def _send_native_generate_content_worker_pool_sync(self, *, model: str, prompt: str, timeout_ms: int) -> tuple[int, bytes]:
+    def _send_native_generate_content_worker_pool_sync(self, *, model: str, prompt: str, timeout_ms: int, max_attempts: int | None = None) -> tuple[int, bytes]:
         pool = self._native_worker_pool_sync()
-        return pool.send(model=model, prompt=prompt, timeout_ms=timeout_ms)
+        if max_attempts is None:
+            return pool.send(model=model, prompt=prompt, timeout_ms=timeout_ms)
+        return pool.send(model=model, prompt=prompt, timeout_ms=timeout_ms, max_attempts=max_attempts)
 
     def _probe_native_worker_generate_content_sync(self, *, model: str, timeout_ms: int) -> tuple[int, bytes, str]:
         pool = self._native_worker_pool_sync()
-        status, raw, metadata = pool.send_with_metadata(model=model, prompt="1", timeout_ms=timeout_ms)
+        status, raw, metadata = pool.send_with_metadata(model=model, prompt="1", timeout_ms=timeout_ms, max_attempts=1)
         return status, raw, str(metadata.get("wire_model") or "")
 
     def _native_worker_pool_sync(self) -> NativeUiWorkerPool:

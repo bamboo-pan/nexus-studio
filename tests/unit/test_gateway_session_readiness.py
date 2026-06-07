@@ -1082,6 +1082,33 @@ def test_send_native_generate_content_uses_worker_pool_when_auth_file_available(
     ]
 
 
+def test_probe_native_worker_generate_content_uses_single_pool_attempt(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    calls = []
+
+    class FakeNativeUiWorkerPool:
+        def __init__(self, *, auth_file, worker_count):
+            self.auth_file = auth_file
+            self.worker_count = worker_count
+
+        def send_with_metadata(self, *, model, prompt, timeout_ms, max_attempts=None):
+            calls.append({"model": model, "prompt": prompt, "timeout_ms": timeout_ms, "max_attempts": max_attempts})
+            return 200, b"ok", {"wire_model": f"models/{model}"}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(session_module, "NativeUiWorkerPool", FakeNativeUiWorkerPool)
+    session = BrowserSession(port=0)
+    session._auth_file = str(auth_file)
+
+    status, raw, wire_model = session._probe_native_worker_generate_content_sync(model="gemini-3.5-flash", timeout_ms=300000)
+
+    assert (status, raw, wire_model) == (200, b"ok", "models/gemini-3.5-flash")
+    assert calls == [{"model": "gemini-3.5-flash", "prompt": "1", "timeout_ms": 300000, "max_attempts": 1}]
+
+
 def test_switch_auth_closes_native_worker_pool(tmp_path, monkeypatch):
     first_auth = tmp_path / "first.json"
     second_auth = tmp_path / "second.json"

@@ -63,6 +63,7 @@ CONFIG_OPTIONS: tuple[ConfigOption, ...] = (
     ConfigOption("AISTUDIO_TIMEOUT_REPLAY", "Replay 超时", "timeouts", "超时与缓存", "int", 120, "浏览器 replay 请求超时秒数。", "timeout_replay", minimum=1, maximum=3600),
     ConfigOption("AISTUDIO_TIMEOUT_STREAM", "Stream 超时", "timeouts", "超时与缓存", "int", 120, "流式请求超时秒数。", "timeout_stream", minimum=1, maximum=3600),
     ConfigOption("AISTUDIO_TIMEOUT_CAPTURE", "Capture 超时", "timeouts", "超时与缓存", "int", 30, "请求快照捕获超时秒数。", "timeout_capture", minimum=1, maximum=3600),
+    ConfigOption("AISTUDIO_WARMUP_PROBE_TIMEOUT_SECONDS", "预热 Probe 超时", "timeouts", "超时与缓存", "int", 30, "启动账号 native UI worker 预热 GenerateContent probe 的单次请求超时秒数。", "warmup_probe_timeout_seconds", minimum=1, maximum=3600),
     ConfigOption("AISTUDIO_SNAPSHOT_CACHE_TTL", "快照缓存 TTL", "timeouts", "超时与缓存", "int", 3600, "浏览器快照缓存保留秒数。", "snapshot_cache_ttl", minimum=0),
     ConfigOption("AISTUDIO_SNAPSHOT_CACHE_MAX", "快照缓存上限", "timeouts", "超时与缓存", "int", 100, "最多保留的浏览器快照数量。", "snapshot_cache_max", minimum=0),
     ConfigOption("AISTUDIO_CAMOUFOX_LOCALE", "浏览器 Locale", "identity", "浏览器身份", "string", "en-US", "代理浏览器使用的 locale。", "camoufox_locale"),
