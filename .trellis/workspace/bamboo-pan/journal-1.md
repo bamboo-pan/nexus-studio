@@ -164,3 +164,36 @@ Testing:
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: Strengthen Playwright UI system test plan
+
+**Date**: 2026-06-07
+**Task**: Strengthen Playwright UI system test plan
+**Branch**: `feature/strengthen-ui-system-test-plan`
+
+### Summary
+
+Redesigned the system test plan around clean WSL test environments, MCP-visible UI user journeys, native AI Studio model-selection regression gates, and official-web latency comparison; recorded the testing convention in backend quality specs.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `85e66b4` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
