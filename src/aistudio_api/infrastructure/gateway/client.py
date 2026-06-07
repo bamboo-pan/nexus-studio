@@ -18,7 +18,8 @@ from aistudio_api.infrastructure.gateway.replay import RequestReplayService
 from aistudio_api.infrastructure.gateway.session import BrowserSession
 from aistudio_api.infrastructure.gateway.streaming import StreamingGateway
 from aistudio_api.infrastructure.gateway.wire_codec import resolve_aistudio_wire_model
-from aistudio_api.infrastructure.gateway.wire_types import AistudioContent, AistudioPart
+from aistudio_api.infrastructure.gateway.wire_codec import AistudioWireCodec
+from aistudio_api.infrastructure.gateway.wire_types import AistudioContent, AistudioGenerationConfig, AistudioPart, AistudioRequest
 from aistudio_api.infrastructure.request_logs import RequestLogStore
 
 logger = logging.getLogger("aistudio")
@@ -44,6 +45,7 @@ _STARTUP_WARMUP_BOTGUARD_TIMEOUT_MS = 15_000
 _STARTUP_WARMUP_TEMPLATE_CAPTURE_TIMEOUT_MS = 30_000
 _WARMUP_PROBE_TIMEOUT_SECONDS = 30
 _DEFAULT_CAPTURE_TIMEOUT_SECONDS = 30
+_DEFAULT_ACCOUNT_NATIVE_REQUEST_TIMEOUT_SECONDS = 120
 
 AI_STUDIO_GENERATE_CONTENT_AUTH_GUIDANCE = (
     "AI Studio GenerateContent permission check failed. The browser can open AI Studio, "
@@ -64,6 +66,12 @@ def _configured_startup_capture_timeout_ms(default_ms: int) -> int:
 
 
 def _configured_warmup_probe_timeout_seconds() -> int:
+    if "AISTUDIO_WARMUP_PROBE_TIMEOUT_SECONDS" in os.environ:
+        try:
+            configured_seconds = int(settings.warmup_probe_timeout_seconds)
+        except (TypeError, ValueError):
+            return _WARMUP_PROBE_TIMEOUT_SECONDS
+        return max(_WARMUP_PROBE_TIMEOUT_SECONDS, configured_seconds)
     if "AISTUDIO_TIMEOUT_REPLAY" not in os.environ:
         return _WARMUP_PROBE_TIMEOUT_SECONDS
     try:
@@ -469,6 +477,24 @@ class AIStudioClient:
     ):
         if self._use_pure_http:
             raise RequestError(501, "Pure HTTP mode is experimental and does not support streaming; disable AISTUDIO_USE_PURE_HTTP or use browser mode")
+        native_body = self._account_native_text_body(
+            model=model,
+            capture_prompt=capture_prompt,
+            capture_images=capture_images,
+            contents=contents,
+            system_instruction_content=system_instruction_content,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            max_tokens=max_tokens,
+            generation_config_overrides=generation_config_overrides,
+            safety_off=safety_off,
+        )
+        if native_body is not None:
+            async for event in self._stream_account_native_text_body(body=native_body, model=model):
+                yield event
+            return
         captured = await self.capture_request(
             prompt=capture_prompt,
             model=model,
@@ -562,6 +588,22 @@ class AIStudioClient:
                 501,
                 PURE_HTTP_GENERATE_CONTENT_UNSUPPORTED,
             )
+        native_body = self._account_native_text_body(
+            model=model,
+            capture_prompt=capture_prompt,
+            capture_images=capture_images,
+            contents=contents,
+            system_instruction_content=system_instruction_content,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            max_tokens=max_tokens,
+            generation_config_overrides=generation_config_overrides,
+            safety_off=safety_off,
+        )
+        if native_body is not None:
+            return await self._generate_account_native_text_body(body=native_body, model=model)
         logger.info("拦截请求: %r", f"{capture_prompt[:20]}...")
         captured = await self.capture_request(capture_prompt, model=model, images=capture_images, contents=contents)
         if not captured:
@@ -650,6 +692,116 @@ class AIStudioClient:
             logger.info("图片已保存: %s (%s bytes)", path, img.size)
 
         return output
+
+    def _account_native_text_body(
+        self,
+        *,
+        model: str,
+        capture_prompt: str,
+        capture_images: Optional[list[str]],
+        contents: Optional[list[AistudioContent]],
+        system_instruction_content: AistudioContent | None,
+        tools: list[list] | None,
+        temperature: Optional[float],
+        top_p: Optional[float],
+        top_k: Optional[int],
+        max_tokens: Optional[int],
+        generation_config_overrides: dict | None,
+        safety_off: bool,
+    ) -> str | None:
+        session = self._session
+        if (
+            self._use_pure_http
+            or session is None
+            or not bool(getattr(session, "has_account_auth", False))
+            or not callable(getattr(session, "send_account_native_generate_content_body", None))
+        ):
+            return None
+        if capture_images or tools or generation_config_overrides or safety_off:
+            return None
+        if any(value is not None for value in (temperature, top_p, top_k, max_tokens)):
+            return None
+
+        native_contents = contents or [self._build_user_content(prompt=capture_prompt, images=None)]
+        if not self._text_only_contents(native_contents):
+            return None
+        if system_instruction_content is not None and not self._text_only_contents([system_instruction_content]):
+            return None
+        if not self._contents_have_text(native_contents, system_instruction_content):
+            return None
+
+        wire_model = resolve_aistudio_wire_model(model)
+        request = AistudioRequest(
+            model=wire_model,
+            contents=native_contents,
+            safety_settings=None,
+            generation_config=AistudioGenerationConfig([]),
+            snapshot=None,
+            system_instruction=system_instruction_content,
+            tools=None,
+            raw_body=[],
+        )
+        return AistudioWireCodec().encode(request)
+
+    def _text_only_contents(self, contents: list[AistudioContent]) -> bool:
+        for content in contents:
+            for part in content.parts:
+                if part.inline_data is not None or part.file_id is not None:
+                    return False
+        return True
+
+    def _contents_have_text(self, contents: list[AistudioContent], system_instruction_content: AistudioContent | None) -> bool:
+        for content in [*(contents or []), *([system_instruction_content] if system_instruction_content is not None else [])]:
+            if any(part.text and str(part.text).strip() for part in content.parts):
+                return True
+        return False
+
+    async def _generate_account_native_text_body(self, *, body: str, model: str) -> ModelOutput:
+        session = self._session
+        if session is None:
+            raise RequestError(503, "native UI worker unavailable: browser session is not initialized")
+        logger.info("AI Studio account native worker direct GenerateContent: model=%s", model)
+        status, raw = await session.send_account_native_generate_content_body(
+            body=body,
+            timeout_ms=self._account_native_request_timeout_ms(settings.timeout_replay),
+            max_attempts=1,
+        )
+        raw_text = raw.decode("utf-8", errors="replace")
+        if status != 200:
+            raise classify_error(status, raw_text)
+        output = parse_text_output(raw_text)
+        output.model = model
+        return output
+
+    async def _stream_account_native_text_body(self, *, body: str, model: str):
+        session = self._session
+        if session is None:
+            raise RequestError(503, "native UI worker unavailable: browser session is not initialized")
+        logger.info("AI Studio account native worker direct stream GenerateContent: model=%s", model)
+        status, raw = await session.send_account_native_generate_content_body(
+            body=body,
+            timeout_ms=self._account_native_request_timeout_ms(settings.timeout_stream),
+            max_attempts=1,
+        )
+        raw_text = raw.decode("utf-8", errors="replace")
+        if status != 200:
+            raise classify_error(status, raw_text)
+        output = parse_text_output(raw_text)
+        if output.thinking:
+            yield ("thinking", output.thinking)
+        if output.text:
+            yield ("body", output.text)
+        if output.function_calls:
+            yield ("tool_calls", output.function_calls)
+        yield ("usage", output.usage)
+        yield ("done", None)
+
+    def _account_native_request_timeout_ms(self, configured_seconds: int) -> int:
+        try:
+            seconds = int(configured_seconds or 0)
+        except (TypeError, ValueError):
+            seconds = 0
+        return max(_DEFAULT_ACCOUNT_NATIVE_REQUEST_TIMEOUT_SECONDS, seconds) * 1000
 
     def _pure_http_generate_content_supported(
         self,

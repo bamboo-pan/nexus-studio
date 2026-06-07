@@ -1,8 +1,18 @@
 import base64
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
-from aistudio_api.infrastructure.gateway.native_ui_worker_pool import NativeUiWorkerPool, NativeUiWorkerProcessError
+import pytest
+
+from aistudio_api.infrastructure.gateway import native_ui_worker_pool as worker_pool_module
+from aistudio_api.infrastructure.gateway.native_ui_worker_pool import (
+    NativeUiWorker,
+    NativeUiWorkerPool,
+    NativeUiWorkerProcessError,
+    NativeUiWorkerRequestError,
+)
 
 
 def _result(body: bytes, *, status: int = 200) -> dict[str, object]:
@@ -14,6 +24,16 @@ def _result(body: bytes, *, status: int = 200) -> dict[str, object]:
         "body_size": len(body),
         "url_path": "/u/0/prompts/new_chat",
     }
+
+
+def test_native_ui_worker_subprocess_env_prepends_package_import_root():
+    worker = NativeUiWorker(index=0, env={"PYTHONPATH": "/existing/path", "AISTUDIO_CAMOUFOX_HEADLESS": "1"})
+
+    expected_import_root = str(Path(worker_pool_module.__file__).resolve().parents[3])
+    pythonpath_entries = worker._env["PYTHONPATH"].split(os.pathsep)
+
+    assert pythonpath_entries[:2] == [expected_import_root, "/existing/path"]
+    assert worker._env["AISTUDIO_CAMOUFOX_HEADLESS"] == "1"
 
 
 def test_native_ui_worker_pool_reuses_single_worker():
@@ -134,6 +154,66 @@ def test_native_ui_worker_pool_retries_request_failure_without_restart():
     assert workers[0].restarts == 0
 
 
+def test_native_ui_worker_pool_restarts_after_navigation_request_failure():
+    workers = []
+
+    class FakeWorker:
+        def __init__(self, *, index, command=None, env=None):
+            self.index = index
+            self.calls = 0
+            self.restarts = 0
+            workers.append(self)
+
+        def send(self, payload, *, timeout_seconds):
+            self.calls += 1
+            if self.calls == 1:
+                return {"ok": False, "error": "AI Studio chat runtime not ready in native UI sender after 180000ms"}
+            return _result(b"after-navigation-restart")
+
+        def restart(self):
+            self.restarts += 1
+
+        def close(self):
+            pass
+
+    pool = NativeUiWorkerPool(auth_file="/tmp/auth.json", worker_count=1, worker_factory=FakeWorker)
+
+    status, raw = pool.send(model="models/gemini-3.5-flash", prompt="retry", timeout_ms=1000)
+
+    assert (status, raw) == (200, b"after-navigation-restart")
+    assert workers[0].calls == 2
+    assert workers[0].restarts == 1
+
+
+def test_native_ui_worker_pool_can_limit_attempts_for_startup_probe():
+    workers = []
+
+    class FakeWorker:
+        def __init__(self, *, index, command=None, env=None):
+            self.index = index
+            self.calls = 0
+            self.restarts = 0
+            workers.append(self)
+
+        def send(self, payload, *, timeout_seconds):
+            self.calls += 1
+            return {"ok": False, "error": f"AI Studio chat runtime not ready on worker-{self.index}"}
+
+        def restart(self):
+            self.restarts += 1
+
+        def close(self):
+            pass
+
+    pool = NativeUiWorkerPool(auth_file="/tmp/auth.json", worker_count=3, worker_factory=FakeWorker)
+
+    with pytest.raises(NativeUiWorkerRequestError, match="worker-0"):
+        pool.send_with_metadata(model="models/gemini-3.5-flash", prompt="warmup", timeout_ms=1000, max_attempts=1)
+
+    assert [worker.calls for worker in workers] == [1, 0, 0]
+    assert [worker.restarts for worker in workers] == [1, 0, 0]
+
+
 def test_native_ui_worker_pool_retries_request_failure_across_configured_workers():
     workers = []
 
@@ -163,6 +243,37 @@ def test_native_ui_worker_pool_retries_request_failure_across_configured_workers
     assert (status, raw) == (200, b"third-worker-ok")
     assert [worker.calls for worker in workers] == [1, 1, 1]
     assert [worker.restarts for worker in workers] == [0, 0, 0]
+
+
+def test_native_ui_worker_pool_preserves_last_worker_error_when_retry_budget_expires(monkeypatch):
+    monotonic_values = iter([1000.0, 1001.0, 1002.0, 2000.0])
+    monkeypatch.setattr(worker_pool_module.time, "monotonic", lambda: next(monotonic_values, 2000.0))
+
+    class FakeWorker:
+        def __init__(self, *, index, command=None, env=None):
+            self.index = index
+            self.calls = 0
+            self.restarts = 0
+
+        def send(self, payload, *, timeout_seconds):
+            self.calls += 1
+            raise NativeUiWorkerProcessError("real native sender navigation timeout; stderr=stage=open_chat.goto")
+
+        def restart(self):
+            self.restarts += 1
+
+        def close(self):
+            pass
+
+    pool = NativeUiWorkerPool(auth_file="/tmp/auth.json", worker_count=1, worker_factory=FakeWorker)
+
+    with pytest.raises(NativeUiWorkerProcessError) as exc_info:
+        pool.send(model="models/gemini-3.5-flash", prompt="retry", timeout_ms=1000)
+
+    message = str(exc_info.value)
+    assert "real native sender navigation timeout" in message
+    assert "stage=open_chat.goto" in message
+    assert "timed out waiting for an available worker" not in message
 
 
 def test_native_ui_worker_pool_leases_multiple_workers_for_concurrent_requests():

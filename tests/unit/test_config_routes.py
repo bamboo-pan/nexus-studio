@@ -32,6 +32,7 @@ def test_config_route_lists_allowlisted_runtime_settings(tmp_path, monkeypatch):
     assert "AISTUDIO_DEFAULT_TEXT_MODEL" in keys
     assert "AISTUDIO_WARMUP_TEXT_MODEL" in keys
     assert "AISTUDIO_NATIVE_UI_WORKERS_PER_ACCOUNT" in keys
+    assert "AISTUDIO_WARMUP_PROBE_TIMEOUT_SECONDS" in keys
     assert "AISTUDIO_PROVIDER_MANAGER_DIR" in keys
     assert "AISTUDIO_ACCOUNT_ROTATION_MODE" not in keys
     assert "AISTUDIO_AUTH_FILE" not in keys

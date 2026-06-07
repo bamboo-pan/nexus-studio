@@ -20,6 +20,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("aistudio.native_worker_pool")
@@ -49,8 +50,35 @@ def _default_worker_command() -> list[str]:
     return [sys.executable, "-m", "aistudio_api.infrastructure.gateway.native_ui_sender", "--worker"]
 
 
+def _package_import_root() -> str:
+    return str(Path(__file__).resolve().parents[3])
+
+
+def _worker_environment(env: dict[str, str] | None = None) -> dict[str, str]:
+    worker_env = dict(env or os.environ.copy())
+    import_root = _package_import_root()
+    pythonpath = worker_env.get("PYTHONPATH") or ""
+    entries = [entry for entry in pythonpath.split(os.pathsep) if entry]
+    if import_root not in entries:
+        entries.insert(0, import_root)
+    worker_env["PYTHONPATH"] = os.pathsep.join(entries)
+    return worker_env
+
+
 def _safe_text(value: object, limit: int = 300) -> str:
     return " ".join(str(value or "").split())[:limit]
+
+
+def _request_error_requires_restart(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    restart_markers = (
+        "ai studio chat runtime not ready",
+        "ai studio image runtime not ready",
+        "native ui sender timeout",
+        "page.goto: timeout",
+        "navigation timeout",
+    )
+    return any(marker in message for marker in restart_markers)
 
 
 class NativeUiWorker:
@@ -65,7 +93,7 @@ class NativeUiWorker:
     ) -> None:
         self.index = index
         self._command = list(command or _default_worker_command())
-        self._env = dict(env or os.environ.copy())
+        self._env = _worker_environment(env)
         self._process: subprocess.Popen[str] | None = None
         self._stdout_queue: queue.Queue[str] = queue.Queue()
         self._stderr_lines: deque[str] = deque(maxlen=40)
@@ -88,8 +116,10 @@ class NativeUiWorker:
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    stderr = self._stderr_summary()
                     self.close()
-                    raise NativeUiWorkerTimeoutError(f"native UI worker {self.index} timed out")
+                    detail = f"; stderr={stderr}" if stderr else ""
+                    raise NativeUiWorkerTimeoutError(f"native UI worker {self.index} timed out{detail}")
                 if process.poll() is not None:
                     stderr = self._stderr_summary()
                     self.close()
@@ -106,6 +136,10 @@ class NativeUiWorker:
                 if parsed.get("id") != request_id:
                     log.debug("Ignoring native UI worker %s message for id=%s", self.index, parsed.get("id"))
                     continue
+                if parsed.get("ok") is False and not parsed.get("fatal"):
+                    stderr = self._stderr_summary()
+                    if stderr:
+                        parsed["stderr"] = stderr
                 return parsed
 
     def restart(self) -> None:
@@ -220,11 +254,18 @@ class NativeUiWorkerPool:
             self._available.put(worker)
         log.info("AI Studio native UI worker pool ready: auth_hash=%s worker_count=%s", self.auth_hash, worker_count)
 
-    def send(self, *, model: str, prompt: str, timeout_ms: int) -> tuple[int, bytes]:
-        status, raw, _metadata = self.send_with_metadata(model=model, prompt=prompt, timeout_ms=timeout_ms)
+    def send(self, *, model: str, prompt: str, timeout_ms: int, max_attempts: int | None = None) -> tuple[int, bytes]:
+        status, raw, _metadata = self.send_with_metadata(model=model, prompt=prompt, timeout_ms=timeout_ms, max_attempts=max_attempts)
         return status, raw
 
-    def send_with_metadata(self, *, model: str, prompt: str, timeout_ms: int) -> tuple[int, bytes, dict[str, object]]:
+    def send_with_metadata(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        timeout_ms: int,
+        max_attempts: int | None = None,
+    ) -> tuple[int, bytes, dict[str, object]]:
         if self._closed:
             raise NativeUiWorkerProcessError("native UI worker pool is closed")
         payload = {
@@ -236,9 +277,16 @@ class NativeUiWorkerPool:
         timeout_seconds = max(60.0, float(timeout_ms) / 1000.0 + 90.0)
         deadline = time.monotonic() + timeout_seconds
         last_error: BaseException | None = None
-        attempts = max(2, self.worker_count)
+        attempts = max(1, int(max_attempts)) if max_attempts is not None else max(2, self.worker_count)
         for _ in range(attempts):
-            worker = self._lease_worker(deadline)
+            try:
+                worker = self._lease_worker(deadline)
+            except NativeUiWorkerTimeoutError as exc:
+                if last_error is None:
+                    last_error = exc
+                else:
+                    log.warning("Native UI worker pool budget exhausted while waiting for retry worker; last_error=%s", last_error)
+                break
             try:
                 result = worker.send(payload, timeout_seconds=max(1.0, deadline - time.monotonic()))
                 status, raw = self._decode_result(result)
@@ -254,7 +302,14 @@ class NativeUiWorkerPool:
                 return status, raw, dict(result)
             except NativeUiWorkerRequestError as exc:
                 last_error = exc
-                log.warning("Native UI worker request failed without process restart: %s", exc)
+                if _request_error_requires_restart(exc):
+                    try:
+                        worker.restart()
+                    except Exception:
+                        pass
+                    log.warning("Restarted native UI worker after request failure: %s", exc)
+                else:
+                    log.warning("Native UI worker request failed without process restart: %s", exc)
             except (NativeUiWorkerProcessError, NativeUiWorkerProtocolError, NativeUiWorkerTimeoutError) as exc:
                 last_error = exc
                 try:
@@ -299,7 +354,9 @@ class NativeUiWorkerPool:
         if result.get("fatal"):
             raise NativeUiWorkerProtocolError(str(result.get("error") or "native UI worker fatal error"))
         if not result.get("ok"):
-            raise NativeUiWorkerRequestError(str(result.get("error") or "native UI worker request failed"))
+            stderr = _safe_text(result.get("stderr"), 500)
+            detail = f"; stderr={stderr}" if stderr else ""
+            raise NativeUiWorkerRequestError(str(result.get("error") or "native UI worker request failed") + detail)
         try:
             status = int(result.get("status") or 0)
             raw = base64.b64decode(str(result.get("body_b64") or ""))

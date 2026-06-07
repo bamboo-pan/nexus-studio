@@ -209,6 +209,9 @@ curl -X DELETE "http://127.0.0.1:$PORT/accounts/$SMOKE_ACCOUNT_ID"
 - Raw browser/context replay is a last fallback only when the native UI path cannot parse/send the request. A returned native UI HTTP status is authoritative and must not be overwritten by raw replay.
 - Do not use `route.continue_(post_data=...)` to rewrite a production AI Studio generation request body.
 - Environment inherited by the worker includes `AISTUDIO_PROXY_SERVER`, `AISTUDIO_CAMOUFOX_GEOIP`, `AISTUDIO_CAMOUFOX_HEADLESS`, and `AISTUDIO_AUTHUSER_CANDIDATES`.
+- Worker subprocesses started from a source-tree server must prepend the repository `src` directory to `PYTHONPATH`; a successful editable install or parent-process `sys.path` mutation is not evidence that child workers can import `aistudio_api`.
+- Real WSL native UI system tests must prove both Python HTTPS reachability to `https://aistudio.google.com/` and Camoufox `page.goto(..., wait_until="commit")` before starting the service. Direct network timeout, proxy CONNECT/TLS breakage, `NS_ERROR_NET_INTERRUPT`, or an `about:blank` browser page is an environment preflight failure, not a native worker readiness success.
+- Startup/warmup probe timeout may be longer than normal request timeout, but account-native user requests must use the request timeout budget (`AISTUDIO_TIMEOUT_STREAM` / `AISTUDIO_TIMEOUT_REPLAY`) so account retry errors surface before Local Studio's outer HTTP client timeout masks them.
 
 ### 4. Validation & Error Matrix
 - Missing `auth_file` path -> worker returns failure and parent falls back only if a non-UI replay path is explicitly allowed by the caller.
@@ -219,6 +222,7 @@ curl -X DELETE "http://127.0.0.1:$PORT/accounts/$SMOKE_ACCOUNT_ID"
 - Worker exits, times out, emits malformed JSON, or returns malformed base64 body -> parent restarts that worker and retries; if still failing, surface the worker failure to the normal fallback/error path.
 - Worker pool size changes or auth file changes -> close the old pool and create a new pool before the next account-backed native send.
 - Request-log oracle sees `models/gemini-3-flash-preview` for a `gemini-3.5-flash` request -> system test must fail.
+- WSL Python HTTPS or Camoufox navigation cannot reach AI Studio -> write a safe `network-preflight.safe.json` artifact and fail the system test before service startup; do not continue to `/health`, model listing, API chat, or host UI assertions.
 
 ### 5. Good/Base/Bad Cases
 - Good: repeated `gemini-3.5-flash` API requests use the same per-account worker pool, matched native UI responses return `200`, and request logs show `models/gemini-3.5-flash` with no auth/rate status.
@@ -235,8 +239,9 @@ curl -X DELETE "http://127.0.0.1:$PORT/accounts/$SMOKE_ACCOUNT_ID"
 - Unit: no-auth/fake sessions still use the in-process clean context path without installing transport init scripts.
 - Unit: invalid/non-wire bodies still exercise browser fetch/context request fallback.
 - Unit: config route exposes `AISTUDIO_NATIVE_UI_WORKERS_PER_ACCOUNT` with default `3` and rejects invalid values.
+- Unit: request-level account-native send timeouts remain bounded by the configured request timeout and do not inherit `AISTUDIO_WARMUP_PROBE_TIMEOUT_SECONDS`.
 - Full unit suite: run `pytest tests/unit -q` after changing gateway replay, warmup, capture, or model rewrite behavior.
-- Real WSL system test: run the current task's `system-test-wsl.sh` and require `WARMUP_COMPLETE`, `API_STREAM_OK`, `UI_STREAM_OK`, `REQUEST_LOG_ORACLE_OK`, `WORKER_POOL_ORACLE_OK`, and `SYSTEM_TEST_PASS`.
+- Real WSL system test: run the current task's `system-test-wsl.sh`; require source-tree import evidence, `NETWORK_PREFLIGHT_OK`, `NATIVE_WORKER_PREFLIGHT_OK`, native worker matched `GenerateContent` log evidence, Windows host Playwright UI artifacts, and `SYSTEM_TEST_PASS`. If `network_preflight_unavailable` appears, the result is an explicit environment blocker rather than a passed or assumed-available native worker test.
 
 ### 7. Wrong vs Correct
 

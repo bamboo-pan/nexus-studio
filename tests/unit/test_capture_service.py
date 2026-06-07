@@ -340,6 +340,26 @@ def test_client_account_text_warmup_uses_native_worker_pool_without_template_cap
             original_session._executor.shutdown(wait=False)
 
 
+def test_client_account_text_warmup_uses_dedicated_probe_timeout(monkeypatch):
+    monkeypatch.setenv("AISTUDIO_WARMUP_PROBE_TIMEOUT_SECONDS", "240")
+    monkeypatch.setattr(settings, "warmup_probe_timeout_seconds", 240)
+    client = AIStudioClient(port=1)
+    original_session = client._session
+    session = NativeWorkerWarmupSession()
+    try:
+        client._session = session
+        client._capture_service = WarmupCaptureService()
+        client._replay_service = WarmupReplayService()
+
+        asyncio.run(client.warmup_account_text_native())
+
+        assert session.worker_probe_calls == [{"model": DEFAULT_WARMUP_TEXT_MODEL, "timeout_ms": 240000}]
+    finally:
+        client._session = None
+        if original_session is not None:
+            original_session._executor.shutdown(wait=False)
+
+
 def test_client_account_text_warmup_keeps_native_worker_forbidden_as_auth_failure():
     client = AIStudioClient(port=1)
     original_session = client._session
