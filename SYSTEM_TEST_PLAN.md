@@ -14,14 +14,19 @@
 * 自定义 OpenAI-compatible provider 在 Local Studio Responses 模式下开启 `reasoning=high` + stream 后，上游返回 reasoning summary 但最终 `local_studio.completed` conversation 和 UI 没有可见思考过程。
 * Google/Gemini 账号预热完成后，首次真实对话仍长时间无输出；账号态文本预热必须先通过每账号 native UI worker pool 完成真实 warmup `GenerateContent` probe，并通过 `GET /health` 的 warmup 状态区分“API 已启动”和“账号 native worker 已就绪”。旧浏览器捕获/模板路径只作为 raw replay fallback 的兼容准备，不能作为账号态文本 readiness 的硬门槛。
 * Google AI Studio 账号态文本请求必须通过每账号 native UI worker pool 复用独立干净进程；不能退回到每请求启动 helper，也不能回到同进程 hook 污染路径导致重新登录后 403。
+* Google AI Studio native UI worker 在真实 AI Studio 页面中没有选中目标文本模型：例如请求 `gemini-3.5-flash` 时页面停在 `chat spark playground`，模型弹层只暴露 `Gemini 3 Flash Preview`，最终返回 `text_model_not_found`。系统测试必须通过真实用户可见的模型选择路径复现并判定该问题，不能只用 API 模型列表或脚本内置模型名假设选择成功。
 * Local Studio 重复发送历史 prompt 会立即复用旧结果；结果重放缓存必须移除，重复 prompt 必须 fresh upstream。
 * Local Studio stream 模式在 UI 中表现为一次性输出；SSE、no-buffer headers 和前端响应式更新必须让增量文本可见。
 
 ## 测试原则
 
 * 所有 P0/P1 用例都在 WSL 临时目录的新副本中运行，不能直接污染开发工作区。
+* 测试环境必须与开发环境分离。系统测试只能从干净临时副本执行，并记录源 commit、临时副本 commit、`git status --porcelain`、依赖安装命令和数据目录；任何直接在开发工作区、带未提交补丁的工作区、或复用开发数据目录跑出的结果都只能算诊断，不能声明通过。
 * 每个真实用户路径必须同时有 API 级验证和浏览器 UI 级验证。
+* Playwright 浏览器 UI 测试必须通过 MCP browser tools 可见执行：测试人员必须能看到页面导航、点击、输入、模型选择、发送、等待、错误/完成状态和截图/快照证据。纯 headless Playwright 脚本可作为批量自动化补充，但不能单独替代 P0/P1 UI 通过依据。
+* UI 测试必须像真实用户一样操作可见控件。禁止把 `page.evaluate()`、Alpine/DOM 状态注入、localStorage 预置、静态 DOM 存在性检查或直接调用内部 JS 方法当作用户路径通过标准；这些只能在用户路径失败后作为诊断手段，并且诊断结果不得覆盖用户路径失败结论。
 * 请求记录必须开启，关键用例要检查完整生命周期：`client_request`、`upstream_request`、`upstream_response`、`client_response`。
+* 用户发送消息的响应时间必须接近直接使用官方 AI Studio 网页的体验。每轮 Google AI Studio 账号态文本系统测试必须测量 Local Studio UI 与官方 AI Studio 直接 UI 在同一账号、同一网络、相同或同级模型、相同 prompt 下的首字延迟和完成耗时；超出本计划预算时即使最终文本正确也不能标为通过。
 * Provider、Interface、Stream、Search、Image Tool、Repeated Prompt、Reasoning、附件和会话操作按下面的组合矩阵覆盖。
 * 工具开关表示“允许使用”，不是“强制调用”。普通聊天在工具开启时仍必须能正常回答。
 * Provider Manager / shared provider-model pool 用例按落地阶段执行。某阶段尚未实现时，可以标记 `not_applicable`，但必须写明当前代码证据，例如没有 Provider Manager route、导航入口、registry schema 或 shared runtime gateway；同一轮仍必须跑完当前阶段的 Local Studio 兼容门禁。
@@ -49,6 +54,63 @@
 | `not_applicable` 滥用 | provider/model 没返回能力时直接跳过，掩盖未覆盖的正向路径 | 每个 `not_applicable` 必须写明具体条件、模型/provider、证据字段和替代正向覆盖用例；同一能力在整轮测试中不能只有 `not_applicable` |
 | 测试 harness 漏判 | 结果文件记录 `assistant_has_thinking=false`、`secret_redacted=false`、`contains_*_error=true`、`reasoning_summary_visible=false`，但 `failures=[]` | 任何 expected/oracle 字段都必须映射到 fail 条件；计划-脚本对齐审计发现未映射字段时，本轮系统测试结论为失败或不完整 |
 | 安全与 artifact 边界 | 截图、server.log、request-log export、conversation JSON 或任务文件带真实 token/cookie/storage state/大图 payload | 提交前和归档前必须扫描 artifacts 与仓库变更；真实凭据、Authorization 明文、Google cookie、storage state、原始大图 payload 出现即 fail，并不得提交 |
+| 测试环境混用 | 在开发工作区临时改代码后跑通，或复用开发数据/缓存/账号副本导致新 pull 用户无法复现 | 系统测试报告必须包含 clean-copy evidence：源 commit、临时副本路径、`git status --porcelain` 为空、环境变量数据目录均指向本轮 `RUN_ROOT`，并且没有本轮临时补丁；缺任一项即 fail |
+| MCP UI 不可见 | headless 脚本或内部状态注入声称 UI 通过，但没人看到真实用户路径 | P0/P1 UI 报告必须包含 MCP snapshot/screenshot、console/network 摘要、被点击/输入的可见控件列表、最终用户可见状态；没有 MCP 可见 UI 阶段即 fail |
+| 官方网页性能差距 | Local Studio 最终返回正确文本，但首字明显慢于官方 AI Studio 直接网页，或等待长到用户以为卡死 | 同账号同网络对照测量官方网页直接 UI 与 Local Studio UI 的 `time_to_first_visible_token_ms`、`time_to_complete_ms`；Local Studio 预热后首字不得超过官方中位数 + 3s 或官方 2 倍中的较大值，完成耗时不得超过官方 1.5 倍 + 5s；超预算即 fail 或明确标记性能阻塞 |
+
+## 测试环境与开发环境分离门禁
+
+每次系统测试必须从用户真实 pull 后会得到的代码状态开始，而不是从当前开发会话里的临时修补状态开始。测试报告必须先输出 `ENV-*` 证据；缺失或失败时，后续 API/UI 成功只能作为诊断信息，不能作为系统测试通过结论。
+
+| ID | 路径 | 步骤 | 通过标准 |
+| --- | --- | --- | --- |
+| ENV-01 | Git + WSL | 在开发工作区记录 `git rev-parse HEAD` 和 `git status --porcelain`；将仓库 rsync 到 `/home/bamboo/nexus-studio-system-test-YYYYMMDD-HHMMSS/repo`；在临时副本中再次记录 commit/status | 源工作区必须没有本任务以外未提交补丁；临时副本 `git status --porcelain` 为空；测试报告包含两个 commit/status 结果；若为验证已提交代码，临时副本必须从该提交或 PR head 创建 |
+| ENV-02 | Data dirs | 设置 `AISTUDIO_LOCAL_STUDIO_DIR`、`AISTUDIO_REQUEST_LOGS_DIR`、`AISTUDIO_GENERATED_IMAGES_DIR`、`AISTUDIO_IMAGE_SESSIONS_DIR`、`AISTUDIO_PROVIDER_MANAGER_DIR` 到本轮 `RUN_ROOT/data/*`；真实账号目录只能作为只读来源或复制到临时目录 | 除 `AISTUDIO_ACCOUNTS_DIR` 明确只读引用外，所有可写数据目录都在本轮 `RUN_ROOT` 下；账号删除/编辑类用例必须使用账号目录副本；不得写入开发工作区 `data/` |
+| ENV-03 | Dependencies | 在临时副本新建 venv 并执行 `pip install -e .`、浏览器安装和 native worker preflight；禁止复用开发 `.venv` 或已启动开发服务 | 报告包含 venv 路径、安装摘要、服务 PID/端口；服务命令从临时副本执行；如果端口连接到旧开发服务，本轮 fail |
+| ENV-04 | Patch discipline | 测试期间如果为了诊断临时修改代码，必须重新从干净副本或提交后的代码重跑 P0/P1 门禁 | 任何“临时打补丁后通过”只能标记 `diagnostic_pass_after_patch`；不能标记 `SYSTEM_TEST_PASS`，除非补丁已经提交/纳入待验证代码并从干净副本重跑 |
+
+## MCP 可见 UI 测试规则
+
+P0/P1 浏览器用例必须有一段 MCP browser tools 可见执行过程。自动化脚本可以负责批量断言，但最终 UI 通过标准必须建立在用户能看到、能复查的页面操作证据上。
+
+| 规则 | 必须执行 | 禁止替代 |
+| --- | --- | --- |
+| 页面可见 | 使用 MCP browser tools 打开 WSL 服务 URL，例如 `http://127.0.0.1:<port>/static/index.html#studio`，通过 snapshot/read_page 或等价工具确认当前页面和关键控件 | 只打开本地静态文件、只检查 HTML 字符串、只看 API health |
+| 用户动作 | 通过可见控件完成导航、点击、输入、选择 provider/model/interface、切换 stream/search/image/reasoning、上传附件、发送消息、重跑、删除、导出 | `page.evaluate()` 直接写 Alpine state、调用内部 JS 方法、预写 localStorage、直接发 `/api/local-studio/chat` 后说 UI 已覆盖 |
+| 可见等待 | 观察 pending/streaming/tool-running/completed/error 状态；记录首个可见 assistant token 的时间和完成时间 | 只等待网络请求返回或只看 request log |
+| 证据输出 | 每个 UI 用例保存 MCP snapshot 摘要、截图、console error 列表、关键 network 响应、被操作控件清单、最终可见结果/错误文本 | 只打印 `passed`，或只保存无判定字段的 JSON |
+| 失败诊断 | 用户路径失败后，可以再运行 headless Playwright 或状态注入脚本定位问题；诊断必须独立标注 | 用诊断脚本成功覆盖用户路径失败，或把状态注入结果计入 P0/P1 UI 通过 |
+
+## 完整用户旅程覆盖清单
+
+每轮完整系统测试必须按用户实际会使用的入口和功能建表执行。下面所有 P0/P1 用户功能都要在 `ui-results.json` 中有 `tested_by` 字段，取值为 `mcp_visible`、`automated_playwright`、`api_only_not_ui_feature` 或 `not_applicable_with_evidence`；用户可见功能不能只标 `api_only_not_ui_feature`。
+
+| 用户区域 | 必测用户动作 | 最低 UI 断言 |
+| --- | --- | --- |
+| 全局导航 | 在 `#studio`、`#chat`、`#images`、`#requests`、`#accounts`、存在时的 `#providers` 间切换并返回原入口 | URL/hash、页面标题/主控件、无 console error；切换后未丢失当前会话状态 |
+| Local Studio provider 设置 | 选择 Google AI Studio；新增/编辑/删除 OpenAI-compatible provider；显示/隐藏 token；加载模型；刷新恢复 | token 不明文泄露；provider 独立恢复；模型列表与 provider 对应；错误 provider 不污染基础模块 |
+| Local Studio 模型与能力选择 | 通过 UI 选择 interface、chat model、image model、stream、search、image tool、reasoning、timeout、附件 | 控件启用/禁用符合模型能力；切换 provider/interface 后无残留；发送前摘要与实际请求一致 |
+| Local Studio 对话 | 新建会话、发送普通文本、观察流式增量、非流式完成、重复 prompt、rerun、刷新恢复、重命名、单删、批量删除 | 首字/完成时间记录；每次发送都有新 upstream log；无 cache hit；刷新后文本、thinking、工具、图片、usage、错误一致 |
+| Search/Image/Reasoning | 分别覆盖工具关闭、工具开启但普通聊天、搜索 prompt、图片生成 prompt、reasoning high + summary auto | 工具是可选能力；工具/引用/图片/思考过程可见或可审计；无空 assistant 卡片或残留 pending |
+| Attachments | 上传图片、文本/PDF 类文件，预览、移除、发送或被 UI 阻止 | 支持模型可发送；不支持模型给出明确错误；附件信息刷新后不损坏 |
+| Request logs | 开启/关闭保存、查看 group、详情、复制、导出、删除、批量删除 | lifecycle 阶段完整；导出 JSON 可解析且脱敏；Local Studio 与基础模块请求可区分 |
+| Accounts | 列出账号、健康检查、激活/切换、池状态、临时副本账号删除 | `/accounts/{id}/test` 文案不等同生成可用；删除只影响临时副本；UI 无 500/ASGI 错误 |
+| Base modules | 在 Local Studio 错误配置后使用 `#chat`、`#images`、`#requests`、`#accounts` 的基础功能 | 基础入口不继承 Local Studio provider/token/base URL；请求日志路径和 provider 隔离 |
+| Provider Manager | 当 `#providers` 或 Provider Manager API 存在时，执行 provider/model registry control plane 用户路径 | 不进入 Local Studio 也能管理 provider；secret 边界、model catalog、health/audit 可见且脱敏 |
+
+## 响应时间与官方 AI Studio 对照
+
+Google AI Studio 账号态文本路径必须测量用户可感知延迟，而不是只测 API 完成。性能门禁只在网络预检和官方网页对照都可用时判定；如果官方网页本身不可达，系统测试以环境阻塞失败，不能把 Local Studio 性能标为通过。
+
+| 指标 | 测量方式 | 预算 |
+| --- | --- | --- |
+| `official_time_to_first_visible_token_ms` | MCP 可见浏览器直接打开官方 AI Studio，同账号同模型或同级官方可选模型，发送短 prompt，从点击 Run 到首个可见回复 token | 作为本轮基准，至少测 3 次并取中位数 |
+| `local_time_to_first_visible_token_ms` | MCP 可见浏览器打开 Local Studio，同账号同 prompt，预热完成后从点击发送到首个可见 assistant token | 不得超过 `max(official_median_first_token_ms * 2, official_median_first_token_ms + 3000)` |
+| `official_time_to_complete_ms` | 官方 AI Studio 从点击 Run 到回复完成/停止按钮消失 | 作为本轮完成耗时基准，至少测 3 次并取中位数 |
+| `local_time_to_complete_ms` | Local Studio 从点击发送到 UI completed，输入框恢复可用且 request log client response 完成 | 不得超过 `official_median_complete_ms * 1.5 + 5000` |
+| `warmup_to_first_user_token_ms` | `/health warmup.status=complete` 后第一条 Local Studio Google 文本请求首字时间 | 必须满足 Local Studio 首字预算；若失败，报告 native worker pool、model selection、server log、network timing 证据 |
+
+性能报告必须包含：账号 id 脱敏摘要、模型/官方页面 label、prompt、每次样本时间、是否命中预热、console/network 摘要、server log 中 native worker lease/matched-response 证据。禁止把冷启动、官方网页不可达、或模型选择失败样本混入性能通过统计。
 
 ## 真实环境
 
@@ -72,8 +134,15 @@ set -euo pipefail
 set +x
 RUN_ROOT="/home/bamboo/nexus-studio-system-test-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RUN_ROOT"
-rsync -a --delete --exclude .git --exclude .venv --exclude venv /mnt/c/Users/bamboo/Desktop/nexus-studio/ "$RUN_ROOT/repo/"
+cd /mnt/c/Users/bamboo/Desktop/nexus-studio
+git rev-parse HEAD > "$RUN_ROOT/source-commit.txt"
+git status --porcelain > "$RUN_ROOT/source-status.txt"
+rsync -a --delete --exclude .venv --exclude venv --exclude data --exclude tmp /mnt/c/Users/bamboo/Desktop/nexus-studio/ "$RUN_ROOT/repo/"
 cd "$RUN_ROOT/repo"
+git rev-parse HEAD > "$RUN_ROOT/test-copy-commit.txt"
+git status --porcelain > "$RUN_ROOT/test-copy-status.txt"
+test -s "$RUN_ROOT/source-status.txt" && { echo "SOURCE_WORKTREE_DIRTY" >&2; exit 2; }
+test -s "$RUN_ROOT/test-copy-status.txt" && { echo "TEST_COPY_WORKTREE_DIRTY" >&2; exit 2; }
 python3 -m venv venv
 . venv/bin/activate
 pip install -e .
@@ -367,29 +436,47 @@ Provider Manager 是 provider-model 池的控制面，不是 Local Studio 会话
 * 当前 assistant 消息不能只剩最终文本或图片而完全丢失过程；不能残留“正在等待模型与图片工具”等 pending 状态；不能生成空 assistant 卡片。
 * 服务端 stderr 不包含 `ResponseNotRead`、`ExceptionGroup`、`Exception in ASGI application`，故障或成功后 `/api/local-studio/health`、`/request-logs/status` 仍返回 200。
 
+### BUG-AISTUDIO-NATIVE-MODEL-SELECTION-01
+
+复现链路：Google AI Studio 账号态文本，warmup 或 Local Studio Google 文本请求选择 `gemini-3.5-flash`，native UI worker 打开官方 AI Studio 页面并通过真实模型选择控件选择目标模型。
+
+必须断言：
+
+* MCP 可见官方 AI Studio 页面当前处于可发送 prompt 的聊天界面，而不是 `chat spark playground`、空白页、账号选择页或其他非目标 surface。
+* 模型选择必须通过可见模型控件完成，并记录当前已选模型 label、候选模型 label 列表、AI Studio URL path、authuser、截图和 snapshot 摘要。
+* 请求 `gemini-3.5-flash` 时，native sender 不能只因为候选列表里出现 `Gemini 3 Flash Preview` 就当作匹配成功；必须证明 wire model、UI label 和 request-log upstream model 映射到同一个目标模型或受控 alias。
+* 如果返回 `text_model_not_found`、`selected=false`、`current=chat spark playground`、目标模型不在可见候选列表、或 URL 从 `/u/<n>/prompts/new_chat` 跳到错误账号/错误 surface，本用例 fail，且不能继续把 warmup 标记为 complete。
+* 失败报告必须包含 server log 中 `native_ui_sender stage=*` 摘要、MCP screenshot/snapshot、可见模型列表、`/health` warmup 状态和 Local Studio UI 错误状态；不得只记录 API 失败文本。
+* 通过报告必须包含 native worker pool 复用证据、matched `GenerateContent` response 证据、request log group id、Local Studio UI 首字/完成时间和官方网页对照时间。
+
 ## 执行顺序
 
-1. 启动 WSL 临时环境前先运行 Native UI worker import/start preflight；该预检必须使用同一 venv、清空外部 `PYTHONPATH`，并从源码入口导入父进程模块后启动 worker 子进程。
-2. 启动 WSL 临时环境，确认 health/model/account 预检通过。
-3. 开启 request logs。
-4. 判定 Provider Manager / shared provider-model pool rollout phase，执行 `PM-ROLL-00`，并为尚未进入的阶段记录带证据的 `not_applicable`。
-5. 执行 API 级 P0 smoke，先验证 provider/model/chat/search/image/reasoning 基础链路；Google 账号态文本 API smoke 必须确认 server.log 中出现 native worker pool ready/start/matched-response 证据，且没有 `ModuleNotFoundError: No module named 'aistudio_api'`。
-6. 从 Windows 主机 Playwright 打开 WSL 服务的真实 WebUI，执行浏览器 P0 Local Studio 矩阵，覆盖 bug 专项和架构契约断言；不能用 WSL 内 headless API smoke 或静态 DOM 检查替代主机 UI 操作。
-7. 如果当前代码已进入 Phase 1/2/3，执行对应 `PM-CP-*`、`PM-DP-*`、`PM-PROTO-*`、`PM-RT-*` 和 `PM-AUDIT-*` 门禁。
-8. 执行 P1 UI 状态、会话、无结果缓存回归、附件、基础模块回归和 provider/reasoning 隔离用例。
-9. 汇总 `architecture-contract-results` 与 `provider-manager-phase-gate-results`，逐项标记每条架构契约断言的 pass/fail/not_applicable。
-10. 导出必要请求记录和截图到本次临时目录的 `artifacts/`，检查脱敏后再附到人工报告；不要提交。
-11. 清理临时服务、浏览器进程和临时数据目录。
+1. 先执行 `ENV-01` 到 `ENV-04`，证明本轮测试来自干净 WSL 临时副本、独立数据目录、独立 venv 和无临时补丁状态；失败时停止并把系统测试标记为环境/流程失败。
+2. 启动 WSL 临时环境前先运行 Native UI worker import/start preflight；该预检必须使用同一 venv、清空外部 `PYTHONPATH`，并从源码入口导入父进程模块后启动 worker 子进程。
+3. 启动 WSL 临时环境，确认 health/model/account 预检通过。
+4. 开启 request logs。
+5. 判定 Provider Manager / shared provider-model pool rollout phase，执行 `PM-ROLL-00`，并为尚未进入的阶段记录带证据的 `not_applicable`。
+6. 执行 API 级 P0 smoke，先验证 provider/model/chat/search/image/reasoning 基础链路；Google 账号态文本 API smoke 必须确认 server.log 中出现 native worker pool ready/start/matched-response 证据，且没有 `ModuleNotFoundError: No module named 'aistudio_api'`。
+7. 使用 MCP browser tools 可见打开官方 AI Studio，完成官方网页直接 UI 基准测量；如果官方网页不可达或目标模型不可选，本轮标记环境/账号/model-selection 阻塞，不能继续声明 Local Studio 性能通过。
+8. 使用 MCP browser tools 从 Windows 主机打开 WSL 服务的真实 WebUI，执行浏览器 P0 Local Studio 矩阵、完整用户旅程覆盖清单、bug 专项和架构契约断言；不能用 WSL 内 headless API smoke、静态 DOM 检查或状态注入替代主机 UI 操作。
+9. 如果当前代码已进入 Phase 1/2/3，执行对应 `PM-CP-*`、`PM-DP-*`、`PM-PROTO-*`、`PM-RT-*` 和 `PM-AUDIT-*` 门禁。
+10. 执行 P1 UI 状态、会话、无结果缓存回归、附件、基础模块回归和 provider/reasoning 隔离用例。
+11. 汇总 `architecture-contract-results`、`provider-manager-phase-gate-results`、`mcp-visible-ui-results` 和 `performance-comparison-results`，逐项标记每条架构契约断言、用户功能和性能预算的 pass/fail/not_applicable。
+12. 导出必要请求记录和截图到本次临时目录的 `artifacts/`，检查脱敏后再附到人工报告；不要提交。
+13. 清理临时服务、浏览器进程和临时数据目录。
 
 ## 通过门禁
 
 * P0 全部通过；P1 不通过项必须有明确 bug 编号、日志、截图和请求记录 group id。
+* `ENV-01` 到 `ENV-04` 必须全部通过；任何开发工作区运行、脏工作区运行、临时补丁后运行、复用开发数据目录或连接旧开发服务的结果都不能标记 `SYSTEM_TEST_PASS`。
 * 没有未捕获 ASGI 异常、浏览器 console error 或 Playwright 页面崩溃。
 * 所有成功路径都能在 UI 中看到用户可理解结果，并在 API/request log 中看到对应请求。
 * 所有失败路径都是受控失败，且服务继续可用。
 * WSL Native UI worker import/start preflight 必须通过；server.log 不得出现 worker 子进程 `ModuleNotFoundError: No module named 'aistudio_api'`、`Error while finding module specification for 'aistudio_api.infrastructure.gateway.native_ui_sender'` 或以 `/api/local-studio/health` 成功掩盖 worker 不可用的情况。
-* 主机 Playwright UI 测试必须实际连接 WSL 服务并完成 Local Studio 用户操作；测试报告需包含 UI 断言、console/network 摘要和截图路径。没有主机 UI 阶段或 UI 阶段为空，本轮系统测试结论必须为失败或不完整。
+* 主机 Playwright UI 测试必须通过 MCP browser tools 可见连接 WSL 服务并完成 Local Studio 用户操作；测试报告需包含 MCP snapshot、UI 断言、console/network 摘要、被操作控件清单和截图路径。没有 MCP 可见 UI 阶段、UI 阶段为空、或用状态注入替代用户操作，本轮系统测试结论必须为失败或不完整。
 * Google AI Studio 账号态文本路径必须证明 native UI worker pool 生效：配置值可查询、重复请求未每次启动新 helper、同账号并发可以租用多个 worker、worker 失败会重启，且 native UI 匹配到的 `401/403/429` 不被 raw replay 覆盖。
+* `BUG-AISTUDIO-NATIVE-MODEL-SELECTION-01` 必须通过；出现 `text_model_not_found`、错误 AI Studio surface、错误 authuser、错误模型 label 映射或目标模型不可见时，warmup 和 Google 文本 UI/API 用例不能标记通过。
+* Google AI Studio 账号态文本响应时间必须满足官方网页对照预算；如果 Local Studio 首字或完成时间超预算，必须标记性能失败并附官方/UI 两侧样本，而不是用最终返回文本掩盖体验退化。
 * 所有适用的架构契约断言必须通过；`not_applicable` 必须有明确原因，不能用于掩盖未覆盖路径。
 * Provider Manager / shared provider-model pool 阶段门禁必须通过：Phase 0 要证明当前 Local Studio 兼容基线未回归；Phase 1/2/3 一旦有对应实现入口，对应控制面、数据面、协议适配、路由/fallback 和审计安全断言不得整体跳过。
 * 测试 harness 本身也要通过门禁：每个 P0/P1 expected 字段、`contains_*` 错误签名、`assistant_has_*`/`*_visible` 可见性字段都必须有对应 fail 条件；只采集不判定的脚本不能作为“全部通过”的依据。
@@ -405,6 +492,8 @@ Provider Manager 是 provider-model 池的控制面，不是 Local Studio 会话
 * `artifacts/summary.md`：执行环境、git commit、服务端口、通过/失败列表。
 * `artifacts/api-results.json`：每个 API 用例的状态码、耗时、request log group id、脱敏错误摘要。
 * `artifacts/ui-results.json`：每个 UI 用例的页面、断言、截图路径、console/network 摘要。
+* `artifacts/mcp-visible-ui-results.json`：每个 MCP 可见 UI 用例的页面 URL、snapshot 摘要、被操作控件、用户输入、可见等待状态、截图路径和 pass/fail 结论。
+* `artifacts/performance-comparison-results.json`：官方 AI Studio 直接 UI 与 Local Studio UI 的首字/完成耗时样本、中位数、预算计算、warmup 状态和性能结论。
 * `artifacts/architecture-contract-results.json`：每条架构契约断言在各用例中的 pass/fail/not_applicable 状态和证据路径。
 * `artifacts/provider-manager-phase-gate-results.json`：当前 rollout phase、`PM-*` 用例结果、未适用阶段证据、routing decision / attempt plan / audit safety 摘要。
 * `artifacts/screenshots/`：关键 UI 成功/失败截图。
