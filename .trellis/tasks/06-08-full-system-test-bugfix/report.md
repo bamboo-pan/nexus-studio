@@ -8,6 +8,7 @@
 | Diagnostic after warm-pool preservation | dirty-source diagnostic | `SYSTEM_TEST_INCOMPLETE`; target performance improved but account alignment still failed | `/home/bamboo/nexus-studio-system-test-20260608-115800` |
 | Diagnostic after native worker warmup recovery | dirty-source diagnostic | `HOST_UI_SMOKE_OK`; target rows passed; dirty-source gates still blocked `SYSTEM_TEST_PASS` | `/home/bamboo/nexus-studio-system-test-20260608-121431` |
 | Formal after commit `e8a8442` | clean WSL copy | `SYSTEM_TEST_INCOMPLETE`; source/test-copy clean, host UI stopped on transient OpenAI-compatible TLS EOF during recovery check | `/home/bamboo/nexus-studio-system-test-20260608-135313` |
+| Formal after commit `ac0ec25` | clean WSL copy | `SYSTEM_TEST_INCOMPLETE concrete_required_case_failures`; API, visible UI, request-log, architecture, source clean, and test-copy clean gates passed | `/home/bamboo/nexus-studio-system-test-20260608-140643` |
 
 ## Initial Failure
 
@@ -56,12 +57,19 @@ AssertionError: expected Local Studio success for openai-compatible-recovery-aft
 
 This failure was outside the Google/native-worker target path and occurred only after the controlled invalid-provider error had already been verified. The host UI smoke now retries that specific recovery sample for transient upstream connect/read/protocol errors while keeping persistent recovery failures hard.
 
+The final formal non-diagnostic run at `/home/bamboo/nexus-studio-system-test-20260608-140643` verified the fixed path from a clean source tree and clean test copy:
+
+- `HOST_UI_SMOKE_OK` with final visible UI artifact `mcp-visible-ui-results.json` written.
+- API/request-log subset, API control-plane subset, provider-manager phase gate, and request-log/architecture oracle all passed.
+- `source_product_status_clean=true`, `test_copy_product_status_clean=true`, `dirty_source_diagnostic_mode=false`, and `pass_blockers=[]`.
+- `G-LS-01`, `G-LS-03`, `BUG-AISTUDIO-NATIVE-MODEL-SELECTION-01`, and `PERF-01` remained in `passing_required_cases`.
+
 ## Remaining Failures
 
-The final diagnostic run still emitted `SYSTEM_TEST_INCOMPLETE` because dirty-source diagnostic mode cannot produce `SYSTEM_TEST_PASS`, and the current executable matrix still has concrete failing rows outside this bug fix:
+The final formal run still emitted `SYSTEM_TEST_INCOMPLETE concrete_required_case_failures` because the current executable matrix has concrete failing rows outside this bug fix. The mapping is complete (`80` required rows mapped, `47` passing, `29` failing, `4` not applicable), and there are no dirty-source pass blockers.
 
 ```text
-ENV-01, ENV-04, G-LS-02, G-LS-04, G-LS-05, G-LS-06, G-LS-07, G-LS-08, G-LS-09, G-LS-10, G-LS-11,
+G-LS-02, G-LS-04, G-LS-05, G-LS-06, G-LS-07, G-LS-08, G-LS-09, G-LS-10, G-LS-11,
 O-LS-04, O-LS-05, O-LS-06, O-LS-07, O-LS-08, O-LS-09, O-LS-10,
 LS-UI-01, LS-UI-02, LS-UI-09, LS-UI-13,
 BASE-CHAT-02, BASE-IMG-01, BASE-IMG-02,
@@ -71,6 +79,6 @@ BUG-GEMINI-IMAGE-TOOL-01, BUG-OPENAI-RESPONSES-REASONING-01
 
 These rows remain explicit plan coverage/product blockers and were not relaxed.
 
-## Next Gate
+## Next Work
 
-After committing the harness retry update, rerun `.trellis/tasks/06-08-full-system-test-bugfix/system-test-wsl.sh` without diagnostic mode from a clean source tree. The expected result is no dirty-source blockers, target rows still passing, and any remaining `SYSTEM_TEST_INCOMPLETE` limited to unresolved matrix rows rather than transient OpenAI-compatible recovery noise.
+The Google/native-worker performance and warmup regression is fixed and verified by the clean formal run. Future work should address the remaining concrete matrix failures above as separate product/system-test tasks; they were not relaxed or marked not applicable in this task.
