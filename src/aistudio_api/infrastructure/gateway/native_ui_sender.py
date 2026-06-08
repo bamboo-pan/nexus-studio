@@ -95,11 +95,11 @@ def _wait_for_chat_ready(page, timeout_ms: int) -> bool:
     return False
 
 
-def _open_chat(page, timeout_ms: int, model: str = "") -> None:
+def _open_chat(page, timeout_ms: int, model: str = "", *, prime_home: bool = True) -> None:
     failures: list[str] = []
     deadline = time.monotonic() + max(1.0, float(timeout_ms) / 1000.0)
     remaining_ms = int(max(0.0, (deadline - time.monotonic()) * 1000))
-    if remaining_ms > 0:
+    if prime_home and remaining_ms > 0:
         home_timeout_ms = min(remaining_ms, _OPEN_CHAT_GOTO_TIMEOUT_MS)
         _trace_stage("open_chat.prime_home", timeout_ms=home_timeout_ms, remaining_ms=remaining_ms)
         try:
@@ -313,7 +313,7 @@ def _validate_payload(payload: dict[str, object]) -> tuple[Path, str, str, int]:
     return auth_path, model, prompt, timeout_ms
 
 
-def _send_on_page(page, *, model: str, prompt: str, timeout_ms: int) -> dict[str, object]:
+def _send_on_page(page, *, model: str, prompt: str, timeout_ms: int, prime_home: bool = True) -> dict[str, object]:
 
     response_holder: dict[str, object] = {}
     observed: list[str] = []
@@ -366,7 +366,7 @@ def _send_on_page(page, *, model: str, prompt: str, timeout_ms: int) -> dict[str
     page.on("response", on_response)
     try:
         _trace_stage("send.start", model=model, timeout_ms=timeout_ms)
-        _open_chat(page, _open_chat_timeout_ms(timeout_ms), model)
+        _open_chat(page, _open_chat_timeout_ms(timeout_ms), model, prime_home=prime_home)
         _trace_stage("send.chat_ready", model=model)
         _select_model(page, model, timeout_ms)
         _trace_stage("send.model_selected", model=model)
@@ -414,21 +414,21 @@ class NativeUiSenderWorker:
         self._cf = None
         self._browser = None
         self._context = None
+        self._page = None
         self._auth_file: str | None = None
 
     def send(self, payload: dict[str, object]) -> dict[str, object]:
         auth_path, model, prompt, timeout_ms = _validate_payload(payload)
         context = self._ensure_context(str(auth_path))
-        page = context.new_page()
+        page, is_new_page = self._ensure_page(context)
         try:
-            return _send_on_page(page, model=model, prompt=prompt, timeout_ms=timeout_ms)
-        finally:
-            try:
-                page.close()
-            except Exception:
-                pass
+            return _send_on_page(page, model=model, prompt=prompt, timeout_ms=timeout_ms, prime_home=is_new_page)
+        except Exception:
+            self._close_page()
+            raise
 
     def close(self) -> None:
+        self._close_page()
         if self._context is not None:
             try:
                 self._context.close()
@@ -440,6 +440,7 @@ class NativeUiSenderWorker:
             except Exception:
                 pass
         self._context = None
+        self._page = None
         self._browser = None
         self._cf = None
         self._auth_file = None
@@ -453,6 +454,7 @@ class NativeUiSenderWorker:
             _trace_stage("context.reuse")
             return self._context
         if self._context is not None:
+            self._close_page()
             try:
                 self._context.close()
             except Exception:
@@ -461,6 +463,32 @@ class NativeUiSenderWorker:
         self._context = self._browser.new_context(storage_state=auth_file, service_workers="block")
         self._auth_file = auth_file
         return self._context
+
+    def _ensure_page(self, context):
+        page = self._page
+        is_closed = False
+        if page is not None:
+            try:
+                is_closed = bool(page.is_closed())
+            except Exception:
+                is_closed = False
+        if page is not None and not is_closed:
+            _trace_stage("page.reuse")
+            return page, False
+        _trace_stage("page.new")
+        page = context.new_page()
+        self._page = page
+        return page, True
+
+    def _close_page(self) -> None:
+        page = self._page
+        self._page = None
+        if page is None:
+            return
+        try:
+            page.close()
+        except Exception:
+            pass
 
 
 def worker_main() -> int:

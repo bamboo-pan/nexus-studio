@@ -201,7 +201,8 @@ curl -X DELETE "http://127.0.0.1:$PORT/accounts/$SMOKE_ACCOUNT_ID"
 ### 3. Contracts
 - Account-backed text-only API sends must decode the AI Studio wire body into `(model, prompt)` and send through the per-account `NativeUiWorkerPool` before any browser/context raw replay.
 - Each stored account owns an isolated `AIStudioClient`; the client's `BrowserSession` owns one native UI worker pool for that account's auth file. Switching auth or closing the client must terminate the old pool.
-- The worker pool must start up to `AISTUDIO_NATIVE_UI_WORKERS_PER_ACCOUNT` independent child processes. A worker child may reuse its own Camoufox browser/context across requests, but it must remain outside the long-lived gateway hook/template browser process.
+- The worker pool must start up to `AISTUDIO_NATIVE_UI_WORKERS_PER_ACCOUNT` independent child processes. A worker child may reuse its own Camoufox browser/context and warmed page across requests, but it must remain outside the long-lived gateway hook/template browser process.
+- Reusing a warmed native worker page must still navigate to a fresh AI Studio `new_chat` URL for every send. It may skip only the extra home-page prime on an already-warmed page; it must close and recreate the page after request failure, auth/context change, or worker close.
 - A worker child must create/use a context with `storage_state=auth_file` and `service_workers="block"`, navigate through configured AI Studio authuser chat routes, select the requested text model, fill the exact prompt, click Run/Send, and return the matched `GenerateContent` response body.
 - Official AI Studio target-model navigation should open `/prompts/new_chat?model=<model>` when a target model is known, but URL initialization is not a sufficient oracle. The current Run settings/current model label must be read back and matched to the requested model before any generation sample is accepted.
 - Account-backed async send paths must use a dedicated native worker executor sized to the worker count; they must not hold the main `_botguard_lock` or the single-thread hook/template Camoufox executor for the full native UI request.
@@ -237,11 +238,13 @@ curl -X DELETE "http://127.0.0.1:$PORT/accounts/$SMOKE_ACCOUNT_ID"
 - Bad: official baseline clicks or sees a model picker card and records `selected=true` while the right-side current model still shows a different model.
 - Bad: Same-process isolated context sends the API prompt after template capture and receives AI Studio `403`, even though the same account/model/prompt succeeds in a standalone clean Camoufox process.
 - Bad: every request starts a fresh helper process, losing worker reuse and adding cold-start latency.
+- Bad: every account-backed native request opens and closes a fresh AI Studio page after warmup, so Local Studio first visible text is dominated by page/model-selection startup while the official baseline reuses a visible page.
 
 ### 6. Tests Required
 - Unit: account-backed `_send_native_generate_content_body_sync` creates/reuses `NativeUiWorkerPool`, passes auth/model/prompt/timeout, and decodes returned bytes.
 - Unit: startup `probe_native_worker_generate_content` calls `NativeUiWorkerPool.send_with_metadata(..., max_attempts=1, retry_statuses=(401, 403))` once per configured worker and still validates the returned status/model before readiness.
 - Unit: native sender and session model-selection tests must simulate a clicked target card while the current model readback remains mismatched; selection must fail or continue retrying until current model readback matches.
+- Unit: native sender worker tests must prove same-auth requests reuse the warmed page, warmed-page sends still call fresh `new_chat` navigation with `prime_home=False`, and a failed request closes the page so the next request recreates it.
 - Unit: native worker pool reuses workers, leases multiple workers under concurrent calls, retries request-level UI failures without restart across configured workers, restarts and retries after process/protocol failure, and closes workers on pool close.
 - Unit: account-backed `send_hooked_request` and `send_streaming_request` use the dedicated native worker executor before the main browser replay path.
 - Unit: switching auth closes the old native worker pool before creating a new one.
@@ -296,6 +299,7 @@ return status, raw
 - P0/P1 UI pass evidence must include a visible MCP browser-tool user path: navigation, clicks, input, model/provider selection, send, visible wait state, final visible result/error, snapshot or screenshot, console summary, and network summary.
 - Host Playwright UI smoke that is intended to satisfy P0/P1 visible UI coverage must launch headed (`headless=false`) and record the browser mode in `mcp-visible-ui-results.json`; headless runs are diagnostic or bulk automation only.
 - Basic headed smoke is not full plan coverage. If the script covers only a subset of `SYSTEM_TEST_PLAN.md`, it must record `coverage_scope`, `covered_plan_items`, and `known_missing_plan_items`, write a plan-script alignment artifact, and exit incomplete/fail instead of emitting `SYSTEM_TEST_PASS`.
+- Plan-script alignment must separate matrix mapping completeness from case success. Every required `SYSTEM_TEST_PLAN.md` P0/P1 row must appear exactly once with `status=pass`, `status=fail`, or `status=not_applicable` plus evidence; broad buckets such as `complete_P0_P1_UI_matrix` or `G-LS-02-through-G-LS-11` are not valid row mappings.
 - Visible UI assertions must match how the user-visible state is represented. Text nodes should use text assertions; form controls must assert `value`, `checked`, `selected`, or disabled state instead of relying on `has_text`, because input values are not visible text content.
 - Direct DOM/Alpine mutation, `page.evaluate()` state injection, localStorage preloading, static DOM checks, or API-only success can be diagnostic aids only. They cannot replace user-path UI pass evidence.
 - The served UI must not create default browser resource 404s such as `/favicon.ico`; strict console-error gates should catch these, and the product should serve or intentionally 204 the resource rather than ignore the console error.
@@ -307,6 +311,7 @@ return status, raw
 - P0/P1 UI result has no MCP-visible user path evidence -> UI coverage is incomplete and system test fails.
 - Host UI smoke result records `browser.headless == true` -> UI coverage is incomplete and system test fails, even when API calls and screenshots exist.
 - Plan-script alignment artifact contains any required P0/P1 case with `status=fail`, `not_covered`, or `incomplete` -> system test result is `SYSTEM_TEST_INCOMPLETE` or fail, never `SYSTEM_TEST_PASS`.
+- Plan-script alignment artifact has `unmapped_required_cases` or duplicate required IDs -> result is an alignment failure. If `unmapped_required_cases=[]` but some rows fail, the result is concrete required-case failure, not incomplete mapping.
 - Browser console contains a resource 404 such as `/favicon.ico` -> fix the app/static route or asset; do not suppress the console error in the system-test verdict.
 - UI runner waits for text stored only in an `<input>`, `<select>`, checkbox, or toggle value -> assertion is invalid; change the runner to assert the control state directly and rerun a clean real-system test.
 - UI path succeeds only after internal state injection -> mark `diagnostic_pass_after_patch` or diagnostic-only, not `SYSTEM_TEST_PASS`.
@@ -319,6 +324,7 @@ return status, raw
 - Base: A basic headed Local Studio smoke passes API/provider checks and writes useful evidence, but also writes a coverage-gap artifact and exits `SYSTEM_TEST_INCOMPLETE` until the complete plan matrix is covered.
 - Bad: The only Local Studio UI proof is `playwright.chromium.launch(headless=True)` plus screenshots; users cannot see the browser path and it cannot satisfy the visible UI gate.
 - Bad: A basic headed UI smoke sends one Google message and one OpenAI-compatible message, then reports `SYSTEM_TEST_PASS` while `SYSTEM_TEST_PLAN.md` P0/P1 rows remain unmapped.
+- Bad: A runner reports `missing_required_coverage=["complete ui-results.json P0/P1 matrix"]` without enumerating each required plan row and its evidence.
 - Bad: A headed browser loads the app and completes chat but the console contains a favicon 404; do not mark the UI gate passed until the static resource behavior is fixed.
 - Bad: A script sets Alpine fields with `page.evaluate()`, clicks send, and claims this proves the provider/model picker user path works.
 - Bad: A local temporary code patch makes a smoke pass, but the clean checkout is never rerun.
@@ -327,6 +333,7 @@ return status, raw
 - Documentation/system-plan updates: run `git diff --check` and markdown diagnostics for changed docs.
 - System-test harness updates: add hard-fail assertions for every expected/oracle field recorded in result JSON.
 - System-test harness updates: add or update plan-script alignment artifacts whenever `SYSTEM_TEST_PLAN.md` coverage changes; every required row must map to pass/fail/not-applicable-with-evidence before any pass verdict.
+- System-test harness updates: include a contract test or equivalent static check that the runner has an explicit required-case registry, emits `unmapped_required_cases`, and does not use broad missing matrix buckets.
 - Host UI smoke updates: assert `browser.headless` is false for P0/P1 visible UI coverage and keep strict console-error checks enabled.
 - Host UI smoke updates: when validating form-driven UI such as provider/model editors, assert rendered control values with Playwright value/checked/selected assertions and keep a screenshot or result artifact for that UI state.
 - Account/gateway/UI code updates: run unit tests plus WSL clean-copy API and MCP-visible UI real-system tests as required by `SYSTEM_TEST_PLAN.md`.
