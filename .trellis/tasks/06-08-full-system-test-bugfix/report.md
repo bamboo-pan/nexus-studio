@@ -7,6 +7,7 @@
 | Initial | clean WSL copy | `SYSTEM_TEST_INCOMPLETE concrete_required_case_failures` | `/home/bamboo/nexus-studio-system-test-20260608-113803` |
 | Diagnostic after warm-pool preservation | dirty-source diagnostic | `SYSTEM_TEST_INCOMPLETE`; target performance improved but account alignment still failed | `/home/bamboo/nexus-studio-system-test-20260608-115800` |
 | Diagnostic after native worker warmup recovery | dirty-source diagnostic | `HOST_UI_SMOKE_OK`; target rows passed; dirty-source gates still blocked `SYSTEM_TEST_PASS` | `/home/bamboo/nexus-studio-system-test-20260608-121431` |
+| Formal after commit `e8a8442` | clean WSL copy | `SYSTEM_TEST_INCOMPLETE`; source/test-copy clean, host UI stopped on transient OpenAI-compatible TLS EOF during recovery check | `/home/bamboo/nexus-studio-system-test-20260608-135313` |
 
 ## Initial Failure
 
@@ -47,6 +48,14 @@ The final diagnostic WSL run at `/home/bamboo/nexus-studio-system-test-20260608-
 - `performance-comparison-results.json` reported `result=pass`, official median completion `4000ms`, Local Studio median completion `7827ms`, and completion budget `11000ms`.
 - API/request-log subset and API control-plane subset both passed.
 
+The first formal non-diagnostic rerun after commit `e8a8442` confirmed the clean-source gates were no longer blockers, but host UI smoke stopped before writing its full artifact because the OpenAI-compatible recovery sample hit a real upstream TLS EOF:
+
+```text
+AssertionError: expected Local Studio success for openai-compatible-recovery-after-invalid-provider, got error=ConnectError: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol
+```
+
+This failure was outside the Google/native-worker target path and occurred only after the controlled invalid-provider error had already been verified. The host UI smoke now retries that specific recovery sample for transient upstream connect/read/protocol errors while keeping persistent recovery failures hard.
+
 ## Remaining Failures
 
 The final diagnostic run still emitted `SYSTEM_TEST_INCOMPLETE` because dirty-source diagnostic mode cannot produce `SYSTEM_TEST_PASS`, and the current executable matrix still has concrete failing rows outside this bug fix:
@@ -64,4 +73,4 @@ These rows remain explicit plan coverage/product blockers and were not relaxed.
 
 ## Next Gate
 
-After committing the task changes, rerun `.trellis/tasks/06-08-full-system-test-bugfix/system-test-wsl.sh` without diagnostic mode from a clean source tree. The expected result is no dirty-source blockers, target rows still passing, and any remaining `SYSTEM_TEST_INCOMPLETE` limited to the unresolved matrix rows above.
+After committing the harness retry update, rerun `.trellis/tasks/06-08-full-system-test-bugfix/system-test-wsl.sh` without diagnostic mode from a clean source tree. The expected result is no dirty-source blockers, target rows still passing, and any remaining `SYSTEM_TEST_INCOMPLETE` limited to unresolved matrix rows rather than transient OpenAI-compatible recovery noise.

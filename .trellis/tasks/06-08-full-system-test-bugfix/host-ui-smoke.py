@@ -1420,11 +1420,7 @@ def exercise_local_studio_invalid_provider_recovery_ui(page, base_url: str, open
     page.keyboard.press("Tab")
     timeout_input.fill("181")
     page.keyboard.press("Tab")
-    recovery_result = send_local_studio_message(
-        page,
-        f"Reply with exactly: nexus-host-ui-recovery-ok-{int(time.time())}",
-        "openai-compatible-recovery-after-invalid-provider",
-    )
+    recovery_result = send_local_studio_recovery_message_with_retry(page, actions)
     residual_state = assert_local_studio_no_cache_or_residual_state(page)
     actions.append("local studio invalid provider controlled error health recovery")
     return {
@@ -1433,6 +1429,36 @@ def exercise_local_studio_invalid_provider_recovery_ui(page, base_url: str, open
         "recovery_result": recovery_result,
         "residual_state": residual_state,
     }
+
+
+def send_local_studio_recovery_message_with_retry(page, actions: list[str]) -> dict[str, object]:
+    transient_markers = (
+        "connecterror",
+        "readerror",
+        "remoteprotocolerror",
+        "connecttimeout",
+        "unexpected_eof_while_reading",
+        "eof occurred in violation of protocol",
+        "connection reset",
+        "temporarily unavailable",
+    )
+    last_error: AssertionError | None = None
+    for attempt_index in range(3):
+        try:
+            return send_local_studio_message(
+                page,
+                f"Reply with exactly: nexus-host-ui-recovery-ok-{int(time.time())}-{attempt_index + 1}",
+                "openai-compatible-recovery-after-invalid-provider",
+            )
+        except AssertionError as exc:
+            lowered = str(exc).lower()
+            if not any(marker in lowered for marker in transient_markers):
+                raise
+            last_error = exc
+            actions.append(f"retry openai-compatible recovery after transient upstream error attempt={attempt_index + 1}")
+            page.wait_for_timeout(2_000 + attempt_index * 2_000)
+    assert last_error is not None
+    raise last_error
 
 
 def exercise_playground_base_chat_ui(page, google_model: str, actions: list[str]) -> dict[str, object]:
