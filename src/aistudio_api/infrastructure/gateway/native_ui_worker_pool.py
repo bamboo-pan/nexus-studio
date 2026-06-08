@@ -77,6 +77,8 @@ def _request_error_requires_restart(exc: BaseException) -> bool:
         "native ui sender timeout",
         "page.goto: timeout",
         "navigation timeout",
+        "targetclosederror",
+        "target page, context or browser has been closed",
     )
     return any(marker in message for marker in restart_markers)
 

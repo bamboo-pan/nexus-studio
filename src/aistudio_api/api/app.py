@@ -89,6 +89,9 @@ def _is_transient_warmup_error(exc: BaseException) -> bool:
         "ai studio chat runtime not ready",
         "ai studio image runtime not ready",
         "failed to trigger send during template capture",
+        "native ui sender timeout",
+        "targetclosederror",
+        "target page, context or browser has been closed",
     )
     if any(marker in message for marker in readiness_markers):
         return True

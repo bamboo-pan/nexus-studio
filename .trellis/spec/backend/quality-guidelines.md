@@ -225,6 +225,7 @@ curl -X DELETE "http://127.0.0.1:$PORT/accounts/$SMOKE_ACCOUNT_ID"
 - Native UI matched response status `401`, `403`, or `429` -> propagate that upstream status and body to normal error classification; do not retry raw replay first.
 - Startup warmup probe sees first-request `401` or `403` from one native UI worker -> retry that same worker/context once; if it still returns a retryable status, fail warmup with the last upstream status/body rather than marking the account ready.
 - Worker returns request failure while staying alive, such as a cold AI Studio page not yet exposing the target model picker -> parent retries another pool worker without restarting the process; request-failure retries should cover the configured worker count.
+- Worker request failure says `TargetClosedError` or `Target page, context or browser has been closed` -> parent restarts that worker before returning it to the pool, because the Playwright context/page boundary is no longer trustworthy.
 - Worker exits, times out, emits malformed JSON, or returns malformed base64 body -> parent restarts that worker and retries; if still failing, surface the worker failure to the normal fallback/error path.
 - Worker pool size changes or auth file changes -> close the old pool and create a new pool before the next account-backed native send.
 - Startup warmup uses the default recent-worker preference -> the same worker can be probed repeatedly while other configured workers stay cold; readiness and performance evidence are invalid.
