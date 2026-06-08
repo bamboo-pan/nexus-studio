@@ -937,7 +937,11 @@ api_local_results = list(api_results.get("api_results") or [])
 architecture_failures = list(architecture.get("failures") or [])
 server_log_text = (artifacts / "server.log").read_text(encoding="utf-8", errors="replace") if (artifacts / "server.log").is_file() else ""
 native_worker_reuse_evidence = "native_ui_sender stage=page.reuse" in server_log_text or "native_ui_sender stage=context.reuse" in server_log_text
-native_generate_content_evidence = "native_ui_sender stage=send.response_matched" in server_log_text
+native_generate_content_evidence = "native_ui_sender stage=send.response_matched" in server_log_text or (
+    "AI Studio native UI worker replay matched response:" in server_log_text
+    and "status=200" in server_log_text
+    and f"wire_model=models/{os.environ['SYSTEM_TEST_MODEL']}" in server_log_text
+)
 pass_blockers = []
 if not source_product_status_clean:
     pass_blockers.append("source_product_worktree_dirty")

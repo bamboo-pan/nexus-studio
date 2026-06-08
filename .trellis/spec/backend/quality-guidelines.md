@@ -314,6 +314,7 @@ return status, raw
 - Google AI Studio account-backed text tests must compare Local Studio user-visible first-token and completion latency against direct official AI Studio web UI in the same network/account/model class.
 - OpenAI-compatible real-system model probes must validate the sentinel response text, not only a 2xx `/responses` status, before selecting a model for later API/UI smoke steps.
 - Local Studio upstream transport failures must surface a diagnostic message with the `httpx` exception type and fallback text when the exception string is empty; blank 502 responses or empty request-log response bodies are not acceptable evidence.
+- Native GenerateContent success evidence may come from child sender stderr (`native_ui_sender stage=send.response_matched`) or parent worker-pool logs (`AI Studio native UI worker replay matched response` with status 200 and requested wire model); system-test oracles must accept both emitted forms.
 
 ### 4. Validation & Error Matrix
 - Dirty source or test copy -> system test fails before service startup.

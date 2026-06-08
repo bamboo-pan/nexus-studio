@@ -14,6 +14,7 @@ def test_system_test_runner_maps_required_rows_explicitly():
     assert "matrix_mapping_complete" in runner
     assert "post_local_studio_with_retries" in runner
     assert "sentinel_matched" in runner
+    assert "AI Studio native UI worker replay matched response:" in runner
     assert "complete ui-results.json P0/P1 matrix" not in runner
     assert "G-LS-02-through-G-LS-11-google-ui-matrix" not in runner
     assert "O-LS-02-through-O-LS-10-openai-ui-matrix" not in runner
