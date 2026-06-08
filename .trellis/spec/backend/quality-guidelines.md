@@ -203,6 +203,8 @@ curl -X DELETE "http://127.0.0.1:$PORT/accounts/$SMOKE_ACCOUNT_ID"
 - Each stored account owns an isolated `AIStudioClient`; the client's `BrowserSession` owns one native UI worker pool for that account's auth file. Switching auth or closing the client must terminate the old pool.
 - The worker pool must start up to `AISTUDIO_NATIVE_UI_WORKERS_PER_ACCOUNT` independent child processes. A worker child may reuse its own Camoufox browser/context and warmed page across requests, but it must remain outside the long-lived gateway hook/template browser process.
 - Reusing a warmed native worker page must still navigate to a fresh AI Studio `new_chat` URL for every send. It may skip only the extra home-page prime on an already-warmed page; it must close and recreate the page after request failure, auth/context change, or worker close.
+- `NativeUiWorkerPool.send()` and normal API `send_with_metadata()` calls must prefer the most recently successful worker so serial same-account requests stay on a hot worker/page. Startup warmup probes must pass `prefer_recent_worker=False` with `max_attempts=1` so every configured worker is probed and warmed in round-robin order.
+- Worker release order is part of the contract: in normal hot-worker mode, successful sends return to the hot end and failed/restarted sends return to the cold end; in round-robin probe mode, every leased worker returns to the tail so the next probe can cover the next worker.
 - A worker child must create/use a context with `storage_state=auth_file` and `service_workers="block"`, navigate through configured AI Studio authuser chat routes, select the requested text model, fill the exact prompt, click Run/Send, and return the matched `GenerateContent` response body.
 - Official AI Studio target-model navigation should open `/prompts/new_chat?model=<model>` when a target model is known, but URL initialization is not a sufficient oracle. The current Run settings/current model label must be read back and matched to the requested model before any generation sample is accepted.
 - Account-backed async send paths must use a dedicated native worker executor sized to the worker count; they must not hold the main `_botguard_lock` or the single-thread hook/template Camoufox executor for the full native UI request.
@@ -225,11 +227,14 @@ curl -X DELETE "http://127.0.0.1:$PORT/accounts/$SMOKE_ACCOUNT_ID"
 - Worker returns request failure while staying alive, such as a cold AI Studio page not yet exposing the target model picker -> parent retries another pool worker without restarting the process; request-failure retries should cover the configured worker count.
 - Worker exits, times out, emits malformed JSON, or returns malformed base64 body -> parent restarts that worker and retries; if still failing, surface the worker failure to the normal fallback/error path.
 - Worker pool size changes or auth file changes -> close the old pool and create a new pool before the next account-backed native send.
+- Startup warmup uses the default recent-worker preference -> the same worker can be probed repeatedly while other configured workers stay cold; readiness and performance evidence are invalid.
+- Serial Local Studio Google performance samples lease different idle workers after the first success -> the pool is rotating cold pages through a performance path and may fail the official-vs-local latency budget.
 - Request-log oracle sees `models/gemini-3-flash-preview` for a `gemini-3.5-flash` request -> system test must fail.
 - WSL Python HTTPS or Camoufox navigation cannot reach AI Studio -> write a safe `network-preflight.safe.json` artifact and fail the system test before service startup; do not continue to `/health`, model listing, API chat, or host UI assertions.
 
 ### 5. Good/Base/Bad Cases
 - Good: repeated `gemini-3.5-flash` API requests use the same per-account worker pool, matched native UI responses return `200`, and request logs show `models/gemini-3.5-flash` with no auth/rate status.
+- Good: serial Local Studio Google performance samples lease the same recently successful worker and reuse its warmed page, while concurrent same-account calls can still lease additional workers.
 - Good: two same-account text requests may lease two different workers when global/API concurrency allows it.
 - Good: official direct baseline opens `https://aistudio.google.com/u/0/prompts/new_chat?model=gemini-3.5-flash`, reads back `Gemini 3.5 Flash` from the visible current model control, and accepts only samples whose request body wire model is `models/gemini-3.5-flash` and whose assistant text appears in the page.
 - Good: account startup warmup gets a transient `403` from a fresh worker context, retries that same worker/context, validates a real `200` `GenerateContent` response, repeats this for each configured worker, and marks the account ready only after all configured worker contexts are prewarmed.
@@ -239,12 +244,14 @@ curl -X DELETE "http://127.0.0.1:$PORT/accounts/$SMOKE_ACCOUNT_ID"
 - Bad: Same-process isolated context sends the API prompt after template capture and receives AI Studio `403`, even though the same account/model/prompt succeeds in a standalone clean Camoufox process.
 - Bad: every request starts a fresh helper process, losing worker reuse and adding cold-start latency.
 - Bad: every account-backed native request opens and closes a fresh AI Studio page after warmup, so Local Studio first visible text is dominated by page/model-selection startup while the official baseline reuses a visible page.
+- Bad: FIFO worker-pool leasing sends three serial performance samples to workers 0, 1, and 2, forcing each sample to pay cold page/model-selection cost even though a hot worker exists.
 
 ### 6. Tests Required
 - Unit: account-backed `_send_native_generate_content_body_sync` creates/reuses `NativeUiWorkerPool`, passes auth/model/prompt/timeout, and decodes returned bytes.
 - Unit: startup `probe_native_worker_generate_content` calls `NativeUiWorkerPool.send_with_metadata(..., max_attempts=1, retry_statuses=(401, 403))` once per configured worker and still validates the returned status/model before readiness.
 - Unit: native sender and session model-selection tests must simulate a clicked target card while the current model readback remains mismatched; selection must fail or continue retrying until current model readback matches.
 - Unit: native sender worker tests must prove same-auth requests reuse the warmed page, warmed-page sends still call fresh `new_chat` navigation with `prime_home=False`, and a failed request closes the page so the next request recreates it.
+- Unit: native worker pool tests must prove serial sends prefer the most recently successful worker, round-robin/probe mode can cover every worker, retryable statuses retry the same worker once before moving on, and the startup warmup probe passes `prefer_recent_worker=False`.
 - Unit: native worker pool reuses workers, leases multiple workers under concurrent calls, retries request-level UI failures without restart across configured workers, restarts and retries after process/protocol failure, and closes workers on pool close.
 - Unit: account-backed `send_hooked_request` and `send_streaming_request` use the dedicated native worker executor before the main browser replay path.
 - Unit: switching auth closes the old native worker pool before creating a new one.

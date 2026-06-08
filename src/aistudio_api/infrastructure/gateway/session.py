@@ -1416,6 +1416,7 @@ class BrowserSession:
                 timeout_ms=timeout_ms,
                 max_attempts=1,
                 retry_statuses=(401, 403),
+                prefer_recent_worker=False,
             )
             last_status = status
             last_raw = raw

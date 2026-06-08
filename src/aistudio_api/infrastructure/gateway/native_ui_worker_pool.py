@@ -249,9 +249,8 @@ class NativeUiWorkerPool:
         self.auth_hash = hashlib.sha256(auth_file.encode("utf-8", errors="replace")).hexdigest()[:12]
         self._closed = False
         self._workers = [worker_factory(index=index, command=command, env=env) for index in range(worker_count)]
-        self._available: queue.Queue[Any] = queue.Queue(maxsize=worker_count)
-        for worker in self._workers:
-            self._available.put(worker)
+        self._available: deque[Any] = deque(self._workers)
+        self._available_condition = threading.Condition()
         log.info("AI Studio native UI worker pool ready: auth_hash=%s worker_count=%s", self.auth_hash, worker_count)
 
     def send(
@@ -262,6 +261,7 @@ class NativeUiWorkerPool:
         timeout_ms: int,
         max_attempts: int | None = None,
         retry_statuses: Sequence[int] | None = None,
+        prefer_recent_worker: bool = True,
     ) -> tuple[int, bytes]:
         status, raw, _metadata = self.send_with_metadata(
             model=model,
@@ -269,6 +269,7 @@ class NativeUiWorkerPool:
             timeout_ms=timeout_ms,
             max_attempts=max_attempts,
             retry_statuses=retry_statuses,
+            prefer_recent_worker=prefer_recent_worker,
         )
         return status, raw
 
@@ -280,6 +281,7 @@ class NativeUiWorkerPool:
         timeout_ms: int,
         max_attempts: int | None = None,
         retry_statuses: Sequence[int] | None = None,
+        prefer_recent_worker: bool = True,
     ) -> tuple[int, bytes, dict[str, object]]:
         if self._closed:
             raise NativeUiWorkerProcessError("native UI worker pool is closed")
@@ -298,13 +300,14 @@ class NativeUiWorkerPool:
         status_attempts_per_worker = 2 if retry_status_set else 1
         for attempt_index in range(attempts):
             try:
-                worker = self._lease_worker(deadline)
+                worker = self._lease_worker(deadline, prefer_recent_worker=prefer_recent_worker)
             except NativeUiWorkerTimeoutError as exc:
                 if last_error is None:
                     last_error = exc
                 else:
                     log.warning("Native UI worker pool budget exhausted while waiting for retry worker; last_error=%s", last_error)
                 break
+            release_as_recent = True
             try:
                 for status_attempt_index in range(status_attempts_per_worker):
                     result = worker.send(payload, timeout_seconds=max(1.0, deadline - time.monotonic()))
@@ -319,8 +322,10 @@ class NativeUiWorkerPool:
                         result.get("url_path") or "",
                     )
                     if status not in retry_status_set:
+                        release_as_recent = True
                         return status, raw, dict(result)
                     last_retry_response = (status, raw, dict(result))
+                    release_as_recent = False
                     if status_attempt_index + 1 < status_attempts_per_worker:
                         log.warning(
                             "AI Studio native UI worker returned retryable status; retrying same worker context: auth_hash=%s worker=%s status=%s pool_attempt=%s/%s status_attempt=%s/%s",
@@ -344,6 +349,7 @@ class NativeUiWorkerPool:
                         )
             except NativeUiWorkerRequestError as exc:
                 last_error = exc
+                release_as_recent = False
                 if _request_error_requires_restart(exc):
                     try:
                         worker.restart()
@@ -354,13 +360,14 @@ class NativeUiWorkerPool:
                     log.warning("Native UI worker request failed without process restart: %s", exc)
             except (NativeUiWorkerProcessError, NativeUiWorkerProtocolError, NativeUiWorkerTimeoutError) as exc:
                 last_error = exc
+                release_as_recent = False
                 try:
                     worker.restart()
                 except Exception:
                     pass
                 log.warning("Restarted native UI worker after protocol/process failure: %s", exc)
             finally:
-                self._release_worker(worker)
+                self._release_worker(worker, prefer_reuse=release_as_recent, prefer_recent_worker=prefer_recent_worker)
         if last_retry_response is not None:
             return last_retry_response
         if last_error is not None:
@@ -370,29 +377,38 @@ class NativeUiWorkerPool:
         raise NativeUiWorkerProcessError("native UI worker pool failed without an available worker")
 
     def close(self) -> None:
-        self._closed = True
+        with self._available_condition:
+            self._closed = True
+            self._available_condition.notify_all()
         for worker in self._workers:
             try:
                 worker.close()
             except Exception:
                 pass
 
-    def _lease_worker(self, deadline: float):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise NativeUiWorkerTimeoutError("native UI worker pool timed out waiting for an available worker")
-        try:
-            return self._available.get(timeout=remaining)
-        except queue.Empty as exc:
-            raise NativeUiWorkerTimeoutError("native UI worker pool timed out waiting for an available worker") from exc
+    def _lease_worker(self, deadline: float, *, prefer_recent_worker: bool):
+        with self._available_condition:
+            while True:
+                if self._closed:
+                    raise NativeUiWorkerProcessError("native UI worker pool is closed")
+                if self._available:
+                    if prefer_recent_worker:
+                        return self._available.pop()
+                    return self._available.popleft()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise NativeUiWorkerTimeoutError("native UI worker pool timed out waiting for an available worker")
+                self._available_condition.wait(timeout=remaining)
 
-    def _release_worker(self, worker: Any) -> None:
-        if self._closed:
-            return
-        try:
-            self._available.put_nowait(worker)
-        except queue.Full:
-            pass
+    def _release_worker(self, worker: Any, *, prefer_reuse: bool, prefer_recent_worker: bool) -> None:
+        with self._available_condition:
+            if self._closed:
+                return
+            if not prefer_recent_worker or prefer_reuse:
+                self._available.append(worker)
+            else:
+                self._available.appendleft(worker)
+            self._available_condition.notify()
 
     def _decode_result(self, result: dict[str, object]) -> tuple[int, bytes]:
         if result.get("fatal"):

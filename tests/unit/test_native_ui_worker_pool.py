@@ -92,6 +92,69 @@ def test_native_ui_worker_pool_can_return_response_metadata():
     assert metadata["body_size"] == len(b"metadata-ok")
 
 
+def test_native_ui_worker_pool_prefers_recent_success_for_serial_requests():
+    workers = []
+
+    class FakeWorker:
+        def __init__(self, *, index, command=None, env=None):
+            self.index = index
+            self.calls = 0
+            workers.append(self)
+
+        def send(self, payload, *, timeout_seconds):
+            self.calls += 1
+            return _result(f"worker-{self.index}-call-{self.calls}".encode("utf-8"))
+
+        def restart(self):
+            raise AssertionError("restart should not be needed")
+
+        def close(self):
+            pass
+
+    pool = NativeUiWorkerPool(auth_file="/tmp/auth.json", worker_count=3, worker_factory=FakeWorker)
+
+    results = [pool.send(model="models/gemini-3.5-flash", prompt=f"prompt-{index}", timeout_ms=1000) for index in range(3)]
+
+    assert [raw for _status, raw in results] == [b"worker-2-call-1", b"worker-2-call-2", b"worker-2-call-3"]
+    assert [worker.calls for worker in workers] == [0, 0, 3]
+
+
+def test_native_ui_worker_pool_can_round_robin_when_recent_preference_disabled():
+    workers = []
+
+    class FakeWorker:
+        def __init__(self, *, index, command=None, env=None):
+            self.index = index
+            self.calls = 0
+            workers.append(self)
+
+        def send(self, payload, *, timeout_seconds):
+            self.calls += 1
+            return _result(f"worker-{self.index}".encode("utf-8"))
+
+        def restart(self):
+            raise AssertionError("restart should not be needed")
+
+        def close(self):
+            pass
+
+    pool = NativeUiWorkerPool(auth_file="/tmp/auth.json", worker_count=3, worker_factory=FakeWorker)
+
+    results = [
+        pool.send_with_metadata(
+            model="models/gemini-3.5-flash",
+            prompt=f"probe-{index}",
+            timeout_ms=1000,
+            max_attempts=1,
+            prefer_recent_worker=False,
+        )
+        for index in range(3)
+    ]
+
+    assert [raw for _status, raw, _metadata in results] == [b"worker-0", b"worker-1", b"worker-2"]
+    assert [worker.calls for worker in workers] == [1, 1, 1]
+
+
 def test_native_ui_worker_pool_restarts_and_retries_single_worker_failure():
     workers = []
 
@@ -116,7 +179,7 @@ def test_native_ui_worker_pool_restarts_and_retries_single_worker_failure():
 
     pool = NativeUiWorkerPool(auth_file="/tmp/auth.json", worker_count=1, worker_factory=FakeWorker)
 
-    status, raw = pool.send(model="models/gemini-3.5-flash", prompt="retry", timeout_ms=1000)
+    status, raw = pool.send(model="models/gemini-3.5-flash", prompt="retry", timeout_ms=1000, prefer_recent_worker=False)
 
     assert (status, raw) == (200, b"after-restart")
     assert workers[0].calls == 2
@@ -208,7 +271,13 @@ def test_native_ui_worker_pool_can_limit_attempts_for_startup_probe():
     pool = NativeUiWorkerPool(auth_file="/tmp/auth.json", worker_count=3, worker_factory=FakeWorker)
 
     with pytest.raises(NativeUiWorkerRequestError, match="worker-0"):
-        pool.send_with_metadata(model="models/gemini-3.5-flash", prompt="warmup", timeout_ms=1000, max_attempts=1)
+        pool.send_with_metadata(
+            model="models/gemini-3.5-flash",
+            prompt="warmup",
+            timeout_ms=1000,
+            max_attempts=1,
+            prefer_recent_worker=False,
+        )
 
     assert [worker.calls for worker in workers] == [1, 0, 0]
     assert [worker.restarts for worker in workers] == [1, 0, 0]
@@ -238,7 +307,7 @@ def test_native_ui_worker_pool_retries_request_failure_across_configured_workers
 
     pool = NativeUiWorkerPool(auth_file="/tmp/auth.json", worker_count=3, worker_factory=FakeWorker)
 
-    status, raw = pool.send(model="models/gemini-3.5-flash", prompt="retry", timeout_ms=1000)
+    status, raw = pool.send(model="models/gemini-3.5-flash", prompt="retry", timeout_ms=1000, prefer_recent_worker=False)
 
     assert (status, raw) == (200, b"third-worker-ok")
     assert [worker.calls for worker in workers] == [1, 1, 1]
@@ -269,7 +338,13 @@ def test_native_ui_worker_pool_retries_configured_status_across_workers():
 
     pool = NativeUiWorkerPool(auth_file="/tmp/auth.json", worker_count=2, worker_factory=FakeWorker)
 
-    status, raw = pool.send(model="models/gemini-3.5-flash", prompt="retry", timeout_ms=1000, retry_statuses=(401, 403))
+    status, raw = pool.send(
+        model="models/gemini-3.5-flash",
+        prompt="retry",
+        timeout_ms=1000,
+        retry_statuses=(401, 403),
+        prefer_recent_worker=False,
+    )
 
     assert (status, raw) == (200, b"second-worker-ok")
     assert [worker.calls for worker in workers] == [2, 1]
@@ -302,7 +377,13 @@ def test_native_ui_worker_pool_retries_configured_status_on_same_worker_first():
 
     pool = NativeUiWorkerPool(auth_file="/tmp/auth.json", worker_count=2, worker_factory=FakeWorker)
 
-    status, raw = pool.send(model="models/gemini-3.5-flash", prompt="retry", timeout_ms=1000, retry_statuses=(401, 403))
+    status, raw = pool.send(
+        model="models/gemini-3.5-flash",
+        prompt="retry",
+        timeout_ms=1000,
+        retry_statuses=(401, 403),
+        prefer_recent_worker=False,
+    )
 
     assert (status, raw) == (200, b"same-worker-ok")
     assert [worker.calls for worker in workers] == [2, 0]
