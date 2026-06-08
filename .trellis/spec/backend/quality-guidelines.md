@@ -312,6 +312,8 @@ return status, raw
 - Direct DOM/Alpine mutation, `page.evaluate()` state injection, localStorage preloading, static DOM checks, or API-only success can be diagnostic aids only. They cannot replace user-path UI pass evidence.
 - The served UI must not create default browser resource 404s such as `/favicon.ico`; strict console-error gates should catch these, and the product should serve or intentionally 204 the resource rather than ignore the console error.
 - Google AI Studio account-backed text tests must compare Local Studio user-visible first-token and completion latency against direct official AI Studio web UI in the same network/account/model class.
+- OpenAI-compatible real-system model probes must validate the sentinel response text, not only a 2xx `/responses` status, before selecting a model for later API/UI smoke steps.
+- Local Studio upstream transport failures must surface a diagnostic message with the `httpx` exception type and fallback text when the exception string is empty; blank 502 responses or empty request-log response bodies are not acceptable evidence.
 
 ### 4. Validation & Error Matrix
 - Dirty source or test copy -> system test fails before service startup.
@@ -325,6 +327,8 @@ return status, raw
 - UI path succeeds only after internal state injection -> mark `diagnostic_pass_after_patch` or diagnostic-only, not `SYSTEM_TEST_PASS`.
 - Official AI Studio direct UI is unreachable -> mark environment/model-selection blocker; do not declare Local Studio latency pass.
 - Local Studio first-token or completion latency exceeds `SYSTEM_TEST_PLAN.md` budget -> performance failure even if final text is correct.
+- OpenAI-compatible `/responses` probe returns HTTP 200 without the expected sentinel text -> do not select that model; continue probing candidates or fail with a safe model-probe artifact.
+- Local Studio OpenAI-compatible upstream request raises an empty `httpx.HTTPError` -> return/log a diagnostic such as `ReadError: upstream request failed without an error message`, not an empty upstream-error message.
 
 ### 5. Good/Base/Bad Cases
 - Good: A WSL run creates `/home/bamboo/nexus-studio-system-test-*`, installs a fresh venv, starts the service from that copy, uses MCP browser tools to perform Local Studio user actions, records request-log group ids, and emits `SYSTEM_TEST_PASS` only after all P0 gates pass.
@@ -342,6 +346,7 @@ return status, raw
 - System-test harness updates: add hard-fail assertions for every expected/oracle field recorded in result JSON.
 - System-test harness updates: add or update plan-script alignment artifacts whenever `SYSTEM_TEST_PLAN.md` coverage changes; every required row must map to pass/fail/not-applicable-with-evidence before any pass verdict.
 - System-test harness updates: include a contract test or equivalent static check that the runner has an explicit required-case registry, emits `unmapped_required_cases`, and does not use broad missing matrix buckets.
+- System-test harness updates: OpenAI-compatible model selection must use a sentinel-output oracle and record the model-probe results in a safe artifact; transient 5xx from the external compatible service may be retried but must remain visible in `api-results.json`.
 - Host UI smoke updates: assert `browser.headless` is false for P0/P1 visible UI coverage and keep strict console-error checks enabled.
 - Host UI smoke updates: when validating form-driven UI such as provider/model editors, assert rendered control values with Playwright value/checked/selected assertions and keep a screenshot or result artifact for that UI state.
 - Account/gateway/UI code updates: run unit tests plus WSL clean-copy API and MCP-visible UI real-system tests as required by `SYSTEM_TEST_PLAN.md`.

@@ -442,6 +442,18 @@ def post_local_studio(payload, timeout=360, expect_error=False):
     })
     return status, data, raw
 
+def post_local_studio_with_retries(payload, *, timeout=360, attempts=2, label="local-studio"):
+    last = None
+    for attempt in range(1, attempts + 1):
+        status, data, raw = post_local_studio(payload, timeout=timeout, expect_error=True)
+        last = (status, data, raw)
+        api_results[-1]["attempt"] = attempt
+        api_results[-1]["label"] = label
+        if status < 500:
+            return status, data, raw
+    assert last is not None
+    return last
+
 def require_status(method: str, path: str, *, payload=None, timeout: int = 120, expected: set[int] | None = None, label: str):
     expected = expected or {200}
     status, data, raw = http_json(method, path, payload, timeout=timeout, expect_error=True)
@@ -629,11 +641,14 @@ def verify_openai_responses_model(candidates: list[str]) -> tuple[str, list[dict
             }
             try:
                 response = client.post(f"{openai_base_url}/responses", headers=headers, json=payload)
-                error_prefix = response.text[:500] if response.status_code >= 400 else ""
+                text = response.text
+                expected = "nexus-openai-model-probe-ok"
+                matched = response.status_code < 400 and expected in text
+                error_prefix = text[:500] if not matched else ""
                 if openai_token:
                     error_prefix = error_prefix.replace(openai_token, "[REDACTED]")
-                results.append({"model": candidate, "status": response.status_code, "ok": response.status_code < 400, "error_prefix": error_prefix})
-                if response.status_code < 400:
+                results.append({"model": candidate, "status": response.status_code, "ok": matched, "sentinel_matched": matched, "error_prefix": error_prefix})
+                if matched:
                     return candidate, results
             except Exception as exc:
                 results.append({"model": candidate, "ok": False, "type": type(exc).__name__, "error_prefix": str(exc)[:500]})
@@ -660,7 +675,7 @@ status, data, raw = post_local_studio({
 })
 assert status == 200 and data.get("conversation", {}).get("messages"), raw[:500]
 
-status, data, raw = post_local_studio({
+status, data, raw = post_local_studio_with_retries({
     "provider_type": "openai",
     "base_url": openai_base_url,
     "api_key": openai_token,
@@ -669,7 +684,7 @@ status, data, raw = post_local_studio({
     "model": openai_model,
     "message": "Reply with exactly: nexus-openai-api-ok",
     "options": {"stream": False, "search": False, "image_tool_enabled": False, "reasoning_effort": "off"},
-})
+}, timeout=180, attempts=3, label="openai-compatible-basic")
 assert status == 200 and data.get("conversation", {}).get("messages"), raw[:500]
 
 status, data, raw = post_local_studio({
@@ -685,7 +700,7 @@ if status >= 500:
 if "Please enable tool_config.include_server_side_tool_invocations" in raw:
     raise AssertionError("Google search/image tool_config include_server_side_tool_invocations regression appeared")
 
-status, data, raw = post_local_studio({
+status, data, raw = post_local_studio_with_retries({
     "provider_type": "openai",
     "base_url": openai_base_url,
     "api_key": openai_token,
@@ -694,7 +709,7 @@ status, data, raw = post_local_studio({
     "model": openai_model,
     "message": "Search today's OpenAI news and summarize in one short sentence.",
     "options": {"stream": True, "search": True, "image_tool_enabled": False, "reasoning_effort": "off"},
-}, expect_error=True)
+}, timeout=180, attempts=3, label="openai-compatible-search")
 if status >= 500:
     raise AssertionError(f"OpenAI-compatible search returned server error: {status} {raw[:300]}")
 if "Unsupported tool type: web_search_preview" in raw:
