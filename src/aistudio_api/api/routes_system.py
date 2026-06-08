@@ -365,10 +365,6 @@ async def force_next_account(runtime_state=Depends(get_runtime_state)):
     if result is None:
         raise HTTPException(500, detail="切换失败")
 
-    account_client_pool = getattr(runtime_state, "account_client_pool", None)
-    if account_client_pool is not None:
-        await account_client_pool.invalidate(result.id)
-
     return {
         "ok": True,
         "account": {

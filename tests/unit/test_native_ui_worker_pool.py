@@ -248,6 +248,44 @@ def test_native_ui_worker_pool_restarts_after_navigation_request_failure():
     assert workers[0].restarts == 1
 
 
+def test_native_ui_worker_pool_restarts_after_current_model_readback_failure():
+    workers = []
+
+    class FakeWorker:
+        def __init__(self, *, index, command=None, env=None):
+            self.index = index
+            self.calls = 0
+            self.restarts = 0
+            workers.append(self)
+
+        def send(self, payload, *, timeout_seconds):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "ok": False,
+                    "error": (
+                        "RuntimeError: AI Studio text model not selected in native UI sender: gemini-3.5-flash; "
+                        "current={'matches': False, 'reason': 'current_text_model_not_found'} "
+                        "opened={'opened': True, 'type': 'text_category'}"
+                    ),
+                }
+            return _result(b"after-model-readback-restart")
+
+        def restart(self):
+            self.restarts += 1
+
+        def close(self):
+            pass
+
+    pool = NativeUiWorkerPool(auth_file="/tmp/auth.json", worker_count=1, worker_factory=FakeWorker)
+
+    status, raw = pool.send(model="models/gemini-3.5-flash", prompt="retry", timeout_ms=1000)
+
+    assert (status, raw) == (200, b"after-model-readback-restart")
+    assert workers[0].calls == 2
+    assert workers[0].restarts == 1
+
+
 def test_native_ui_worker_pool_restarts_after_target_closed_request_failure():
     workers = []
 

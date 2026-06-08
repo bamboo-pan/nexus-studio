@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from aistudio_api.api.routes_accounts import login_status
+from aistudio_api.api.routes_accounts import activate_account, login_status
 from aistudio_api.infrastructure.account.account_store import AccountStore
 from aistudio_api.infrastructure.account.login_service import LoginSession, LoginStatus
 
@@ -58,3 +58,52 @@ def test_completed_login_status_activates_saved_account_auth_once():
     assert response_again.status == LoginStatus.COMPLETED.value
     assert session.auth_activated is True
     assert service.calls == 1
+
+
+def test_manual_account_activation_preserves_warmed_account_client_pool():
+    account = SimpleNamespace(
+        id="acc_1",
+        name="Account",
+        email=None,
+        created_at="now",
+        last_used="now",
+        tier="pro",
+        health_status="healthy",
+        health_reason=None,
+        last_health_check=None,
+        isolated_until=None,
+    )
+
+    class FakeAccountService:
+        def __init__(self):
+            self.calls = 0
+
+        async def activate_account(self, account_id, browser_session, snapshot_cache, busy_lock):
+            self.calls += 1
+            assert account_id == "acc_1"
+            assert browser_session == "client"
+            assert snapshot_cache == "snapshot-cache"
+            assert busy_lock == "busy-lock"
+            return account
+
+    class FakeAccountClientPool:
+        def __init__(self):
+            self.invalidated = []
+
+        async def invalidate(self, account_id):
+            self.invalidated.append(account_id)
+
+    account_client_pool = FakeAccountClientPool()
+    runtime_state = SimpleNamespace(
+        client="client",
+        snapshot_cache="snapshot-cache",
+        busy_lock="busy-lock",
+        account_client_pool=account_client_pool,
+    )
+
+    response = asyncio.run(
+        activate_account("acc_1", account_service=FakeAccountService(), runtime_state=runtime_state)
+    )
+
+    assert response.id == "acc_1"
+    assert account_client_pool.invalidated == []
