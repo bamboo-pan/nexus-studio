@@ -898,6 +898,42 @@ def test_chat_route_image_tool_transport_error_does_not_call_images_api(tmp_path
     assert "peer closed connection" in response.json()["detail"]["message"]
 
 
+def test_chat_route_empty_transport_error_is_diagnostic(tmp_path, monkeypatch):
+    app, old_dir = local_studio_app(tmp_path)
+
+    class FakeClient:
+        def __init__(self, timeout):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def post(self, url, headers, json):
+            raise httpx.ReadError("")
+
+    monkeypatch.setattr(routes_local_studio, "_new_http_client", FakeClient)
+    try:
+        response = request_app(
+            app,
+            "POST",
+            "/api/local-studio/chat",
+            json={
+                "base_url": "http://compat.example/v1",
+                "api_key": "token-1",
+                "model": "gpt-5.4-mini",
+                "message": "hello",
+            },
+        )
+    finally:
+        settings.local_studio_dir = old_dir
+
+    assert response.status_code == 502
+    assert response.json()["detail"]["message"] == "ReadError: upstream request failed without an error message"
+
+
 def test_responses_stream_completed_event_extracts_image_candidates():
     parsed = parse_local_studio_stream_event(
         "responses",
@@ -1472,6 +1508,50 @@ def test_stream_chat_transport_error_without_partial_output_persists_error(tmp_p
     assert assistant["content"] == ""
     assert assistant["images"] == []
     assert "peer closed connection" in assistant["error"]
+
+
+def test_stream_chat_empty_transport_error_is_diagnostic(tmp_path, monkeypatch):
+    app, old_dir = local_studio_app(tmp_path)
+
+    class FakeClient:
+        def __init__(self, timeout):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        def stream(self, method, url, headers, json):
+            raise httpx.ReadError("")
+
+    monkeypatch.setattr(routes_local_studio, "_new_http_client", FakeClient)
+    try:
+        response = request_app(
+            app,
+            "POST",
+            "/api/local-studio/chat",
+            json={
+                "base_url": "http://compat.example/v1",
+                "api_key": "token-1",
+                "model": "gpt-5.4-mini",
+                "message": "hello",
+                "options": {"stream": True},
+            },
+        )
+    finally:
+        settings.local_studio_dir = old_dir
+
+    completed = [
+        json.loads(line[6:])
+        for line in response.text.splitlines()
+        if line.startswith("data: ") and json.loads(line[6:]).get("type") == "local_studio.completed"
+    ][0]
+    assistant = completed["conversation"]["messages"][-1]
+
+    assert response.status_code == 200
+    assert assistant["error"] == "ReadError: upstream stream failed without an error message"
 
 
 def test_stream_chat_http_status_error_reads_stream_body_without_response_not_read(tmp_path, monkeypatch):

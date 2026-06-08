@@ -215,6 +215,17 @@ def _upstream_error(exc: httpx.HTTPStatusError, body: bytes | None = None) -> HT
     return _upstream_error_from_response(exc.response, body)
 
 
+def _httpx_error_message(exc: httpx.HTTPError, fallback: str) -> str:
+    message = str(exc).strip()
+    current = exc.__cause__ or exc.__context__
+    while not message and current is not None:
+        message = str(current).strip()
+        current = current.__cause__ or current.__context__
+    if not message:
+        message = fallback
+    return f"{type(exc).__name__}: {message}"
+
+
 @router.get("/health")
 async def health() -> dict[str, Any]:
     store = LocalStudioStore()
@@ -241,8 +252,9 @@ async def list_models(request: Request, payload: dict[str, Any] = Body(...)) -> 
         _record_upstream_response(entry=entry, kind=f"local_studio_models_{mode}", model="", method="GET", url=url, headers=headers, status_code=504, response_headers={}, response_body=f"Model list request timed out after {timeout}s", elapsed_ms=(time.perf_counter() - started) * 1000)
         raise HTTPException(status_code=504, detail=_error_detail("Model list request timed out", "upstream_timeout")) from exc
     except httpx.HTTPError as exc:
-        _record_upstream_response(entry=entry, kind=f"local_studio_models_{mode}", model="", method="GET", url=url, headers=headers, status_code=502, response_headers={}, response_body=str(exc), elapsed_ms=(time.perf_counter() - started) * 1000)
-        raise HTTPException(status_code=502, detail=_error_detail(str(exc), "upstream_error")) from exc
+        message = _httpx_error_message(exc, "model list upstream request failed without an error message")
+        _record_upstream_response(entry=entry, kind=f"local_studio_models_{mode}", model="", method="GET", url=url, headers=headers, status_code=502, response_headers={}, response_body=message, elapsed_ms=(time.perf_counter() - started) * 1000)
+        raise HTTPException(status_code=502, detail=_error_detail(message, "upstream_error")) from exc
 
     _record_upstream_response(entry=entry, kind=f"local_studio_models_{mode}", model="", method="GET", url=url, headers=headers, status_code=response.status_code, response_headers=dict(response.headers), response_body=response.content, elapsed_ms=(time.perf_counter() - started) * 1000)
     data = response.json()
@@ -440,7 +452,7 @@ async def _complete_local_studio_chat(
         store.save(conversation)
         raise HTTPException(status_code=504, detail=_error_detail(message, "upstream_timeout")) from exc
     except httpx.HTTPError as exc:
-        message = str(exc)
+        message = _httpx_error_message(exc, "upstream request failed without an error message")
         _record_upstream_response(entry=entry, kind=kind, model=model, method="POST", url=url, headers=headers, status_code=502, response_headers={}, response_body=message, elapsed_ms=(time.perf_counter() - started) * 1000)
         store.add_assistant_message(conversation, error=message)
         store.save(conversation)
@@ -562,7 +574,7 @@ async def _stream_local_studio_chat(
         yield f"data: {json.dumps({'type':'error','error':{'message':error_message}}, ensure_ascii=False)}\n\n".encode("utf-8")
     except httpx.HTTPError as exc:
         status_code = 502
-        error_message = str(exc)
+        error_message = _httpx_error_message(exc, "upstream stream failed without an error message")
         response_chunks.append(error_message.encode("utf-8"))
         yield f"data: {json.dumps({'type':'error','error':{'message':error_message}}, ensure_ascii=False)}\n\n".encode("utf-8")
     finally:

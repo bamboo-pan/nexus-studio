@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 6
+- **Total Sessions**: 7
 - **Last Active**: 2026-06-08
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~232 | Active |
+| `journal-1.md` | ~269 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 7 | 2026-06-08 | Fix Local Studio Google budget and matrix | `1587ebe`, `ff8f30c`, `f8394a5`, `c09c029`, `db8b4a7` | `feature/local-studio-google-budget-matrix` |
 | 6 | 2026-06-08 | System test bug fixes | `68959d8` | `feature/system-test-bug-fixes-20260607` |
 | 5 | 2026-06-07 | Strengthen Playwright UI system test plan | `85e66b4` | `feature/strengthen-ui-system-test-plan` |
 | 4 | 2026-06-07 | Fix native UI worker WSL startup | `38ca90f` | `feature/fix-native-ui-worker-wsl-system-test` |

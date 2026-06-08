@@ -5,7 +5,7 @@ import pytest
 
 from aistudio_api.infrastructure.gateway import native_ui_sender
 from aistudio_api.infrastructure.gateway.session import AI_STUDIO_CURRENT_TEXT_MODEL_JS, AI_STUDIO_SELECT_TEXT_MODEL_JS
-from aistudio_api.infrastructure.gateway.native_ui_sender import _send_on_page
+from aistudio_api.infrastructure.gateway.native_ui_sender import NativeUiSenderWorker, _send_on_page
 
 
 class FakeRequest:
@@ -50,6 +50,7 @@ class FakePage:
         self.current_model_matches = False
         self.current_model_label = "Chat Spark Playground"
         self.current_model_match_after_success = True
+        self.closed = False
 
     def goto(self, url: str, **kwargs):
         self.goto_urls.append(url)
@@ -67,6 +68,12 @@ class FakePage:
         if selector == "textarea":
             return FakeTextArea(self)
         return None
+
+    def is_closed(self):
+        return self.closed
+
+    def close(self):
+        self.closed = True
 
     def evaluate(self, script: str, *args):
         if script == "mw:!!window.default_MakerSuite":
@@ -262,15 +269,90 @@ def test_send_on_page_uses_extended_open_chat_budget(monkeypatch):
     page = FakePage()
     open_chat_calls = []
 
-    def open_chat(_page, timeout_ms: int, model: str = ""):
-        open_chat_calls.append((timeout_ms, model))
+    def open_chat(_page, timeout_ms: int, model: str = "", *, prime_home: bool = True):
+        open_chat_calls.append((timeout_ms, model, prime_home))
 
     monkeypatch.setattr(native_ui_sender, "_open_chat", open_chat)
 
     result = _send_on_page(page, model="gemini-3.5-flash", prompt="warmup", timeout_ms=300_000)
 
     assert result["status"] == 200
-    assert open_chat_calls == [(180_000, "gemini-3.5-flash")]
+    assert open_chat_calls == [(180_000, "gemini-3.5-flash", True)]
+
+
+def test_send_on_page_can_skip_home_prime_for_warmed_worker_page(monkeypatch):
+    page = FakePage()
+    open_chat_calls = []
+
+    def open_chat(_page, timeout_ms: int, model: str = "", *, prime_home: bool = True):
+        open_chat_calls.append((timeout_ms, model, prime_home))
+
+    monkeypatch.setattr(native_ui_sender, "_open_chat", open_chat)
+
+    result = _send_on_page(page, model="gemini-3.5-flash", prompt="warmup", timeout_ms=300_000, prime_home=False)
+
+    assert result["status"] == 200
+    assert open_chat_calls == [(180_000, "gemini-3.5-flash", False)]
+
+
+class FakeContext:
+    def __init__(self):
+        self.pages = []
+
+    def new_page(self):
+        page = FakePage()
+        self.pages.append(page)
+        return page
+
+    def close(self):
+        for page in self.pages:
+            page.close()
+
+
+def test_native_sender_worker_reuses_warmed_page(monkeypatch, tmp_path):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text('{"cookies":[],"origins":[]}', encoding="utf-8")
+    context = FakeContext()
+
+    worker = NativeUiSenderWorker()
+    monkeypatch.setattr(worker, "_ensure_context", lambda auth_file: context)
+
+    first = worker.send({"auth_file": str(auth_file), "model": "gemini-3.5-flash", "prompt": "warmup", "timeout_ms": 1000})
+    second = worker.send({"auth_file": str(auth_file), "model": "gemini-3.5-flash", "prompt": "warmup", "timeout_ms": 1000})
+
+    assert first["status"] == 200
+    assert second["status"] == 200
+    assert len(context.pages) == 1
+    assert context.pages[0].filled_prompts == ["warmup", "warmup"]
+
+
+def test_native_sender_worker_closes_warmed_page_after_request_failure(monkeypatch, tmp_path):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text('{"cookies":[],"origins":[]}', encoding="utf-8")
+    context = FakeContext()
+
+    worker = NativeUiSenderWorker()
+    monkeypatch.setattr(worker, "_ensure_context", lambda auth_file: context)
+    original_send_on_page = native_ui_sender._send_on_page
+    calls = {"count": 0}
+
+    def flaky_send_on_page(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("native UI sender timeout")
+        return original_send_on_page(*args, **kwargs)
+
+    monkeypatch.setattr(native_ui_sender, "_send_on_page", flaky_send_on_page)
+
+    with pytest.raises(RuntimeError, match="native UI sender timeout"):
+        worker.send({"auth_file": str(auth_file), "model": "gemini-3.5-flash", "prompt": "warmup", "timeout_ms": 1000})
+
+    assert context.pages[0].closed is True
+
+    result = worker.send({"auth_file": str(auth_file), "model": "gemini-3.5-flash", "prompt": "warmup", "timeout_ms": 1000})
+
+    assert result["status"] == 200
+    assert len(context.pages) == 2
 
 
 def test_open_chat_shares_timeout_across_candidate_urls(monkeypatch):

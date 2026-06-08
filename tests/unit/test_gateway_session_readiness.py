@@ -1116,13 +1116,14 @@ def test_probe_native_worker_generate_content_retries_permission_statuses(tmp_pa
             self.auth_file = auth_file
             self.worker_count = worker_count
 
-        def send_with_metadata(self, *, model, prompt, timeout_ms, max_attempts=None, retry_statuses=None):
+        def send_with_metadata(self, *, model, prompt, timeout_ms, max_attempts=None, retry_statuses=None, prefer_recent_worker=True):
             calls.append({
                 "model": model,
                 "prompt": prompt,
                 "timeout_ms": timeout_ms,
                 "max_attempts": max_attempts,
                 "retry_statuses": retry_statuses,
+                "prefer_recent_worker": prefer_recent_worker,
             })
             return 200, b"ok", {"wire_model": f"models/{model}"}
 
@@ -1144,6 +1145,7 @@ def test_probe_native_worker_generate_content_retries_permission_statuses(tmp_pa
             "timeout_ms": 300000,
             "max_attempts": 1,
             "retry_statuses": (401, 403),
+            "prefer_recent_worker": False,
         },
         {
             "model": "gemini-3.5-flash",
@@ -1151,6 +1153,7 @@ def test_probe_native_worker_generate_content_retries_permission_statuses(tmp_pa
             "timeout_ms": 300000,
             "max_attempts": 1,
             "retry_statuses": (401, 403),
+            "prefer_recent_worker": False,
         }
     ]
 

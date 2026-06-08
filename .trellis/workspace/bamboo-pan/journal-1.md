@@ -230,3 +230,40 @@ Fixed AI Studio system-test regressions around official model selection, native 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 7: Fix Local Studio Google budget and matrix
+
+**Date**: 2026-06-08
+**Task**: Fix Local Studio Google budget and matrix
+**Branch**: `feature/local-studio-google-budget-matrix`
+
+### Summary
+
+Fixed Local Studio Google native UI warm-path performance with hot worker reuse, hardened transient native worker recovery and compatible-provider diagnostics, completed explicit system-test matrix mapping, and verified with full local tests plus final real WSL API/headed UI run /home/bamboo/nexus-studio-system-test-20260608-103937.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1587ebe` | (see git log) |
+| `ff8f30c` | (see git log) |
+| `f8394a5` | (see git log) |
+| `c09c029` | (see git log) |
+| `db8b4a7` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

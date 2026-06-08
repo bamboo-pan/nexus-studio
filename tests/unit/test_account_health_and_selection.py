@@ -179,6 +179,10 @@ def test_warmup_retry_classifies_navigation_timeout_only_as_transient():
     assert _is_transient_warmup_error(RuntimeError("failed to trigger send during template capture")) is True
     assert _is_transient_warmup_error(RuntimeError("BotGuardService capture timeout")) is True
     assert _is_transient_warmup_error(RuntimeError("AI Studio chat runtime not ready after navigating to https://aistudio.google.com/")) is True
+    assert _is_transient_warmup_error(
+        RuntimeError("native UI worker pool request failed after retry: TargetClosedError: Page.wait_for_timeout: Target page, context or browser has been closed")
+    ) is True
+    assert _is_transient_warmup_error(RuntimeError("native UI worker pool request failed after retry: RuntimeError: native UI sender timeout; observed=[]")) is True
     assert _is_transient_warmup_error(RuntimeError("Google sign-in auth state is missing or invalid")) is False
     assert _is_transient_warmup_error(RuntimeError("GenerateContent permission denied. Please try again.")) is False
     assert _is_transient_warmup_error(RuntimeError("invalid account auth message")) is False

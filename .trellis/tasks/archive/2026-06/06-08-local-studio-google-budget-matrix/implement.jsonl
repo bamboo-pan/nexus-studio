@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend spec index for Local Studio, gateway, UI harness, and real system-test changes."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Contracts for native UI generation, visible UI oracles, performance budgets, and plan-script alignment gates."}
+{"file":".trellis/spec/guides/index.md","reason":"Shared thinking triggers for cross-layer and reuse checks."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"This task spans backend gateway, static UI, request logs, and WSL/host system-test artifacts."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Search-before-changing guidance for shared constants, helpers, and repeated harness mapping logic."}
+{"file":".trellis/tasks/06-08-local-studio-google-budget-matrix/research/previous-system-test-blockers.md","reason":"Previous real-system-test evidence and remaining blocker interpretation."}
