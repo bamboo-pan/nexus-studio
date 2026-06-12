@@ -1,0 +1,3 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend spec index for system-test and gateway/UI-related changes."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Real WSL system-test, native worker, request-log, and visible UI oracle requirements."}
+{"file":".trellis/tasks/06-08-full-system-test-bugfix/research/system-test-scope.md","reason":"Task-specific system-test scope and known blocker context."}

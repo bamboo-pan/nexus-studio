@@ -6,7 +6,7 @@ import pytest
 from aistudio_api.infrastructure.cache.snapshot_cache import SnapshotCache
 from aistudio_api.config import DEFAULT_WARMUP_TEXT_MODEL, settings
 from aistudio_api.api.app import _warmup_with_retries
-from aistudio_api.domain.errors import AuthError, ModelNotFoundError
+from aistudio_api.domain.errors import AuthError, ModelNotFoundError, UsageLimitExceeded
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest, RequestCaptureService
 
@@ -360,6 +360,72 @@ def test_client_account_text_warmup_uses_native_worker_pool_without_template_cap
             original_session._executor.shutdown(wait=False)
 
 
+def test_client_account_text_warmup_falls_back_to_next_model_candidate(monkeypatch):
+    monkeypatch.setenv("AISTUDIO_WARMUP_TEXT_MODEL_CANDIDATES", "gemini-3.1-flash-lite,gemini-3.5-flash")
+    client = AIStudioClient(port=1)
+    original_session = client._session
+    events = []
+    session = NativeWorkerWarmupSession(
+        [
+            ModelNotFoundError("AI Studio text model not selected in native UI sender"),
+            (200, b"ok", "models/gemini-3.1-flash-lite"),
+        ],
+        events=events,
+    )
+    capture_service = WarmupCaptureService(events=events)
+    try:
+        client._session = session
+        client._capture_service = capture_service
+        client._replay_service = WarmupReplayService()
+
+        asyncio.run(client.warmup_account_text_native())
+
+        assert session.worker_probe_calls == [
+            {"model": DEFAULT_WARMUP_TEXT_MODEL, "timeout_ms": 30000},
+            {"model": "gemini-3.1-flash-lite", "timeout_ms": 30000},
+        ]
+        assert session.ensure_context_calls == []
+        assert capture_service.warmup_calls == []
+        assert events == ["worker_probe", "worker_probe"]
+    finally:
+        client._session = None
+        if original_session is not None:
+            original_session._executor.shutdown(wait=False)
+
+
+def test_client_account_text_warmup_falls_back_after_model_quota(monkeypatch):
+    monkeypatch.setenv("AISTUDIO_WARMUP_TEXT_MODEL_CANDIDATES", "gemini-3.1-flash-lite,gemini-3.5-flash")
+    client = AIStudioClient(port=1)
+    original_session = client._session
+    events = []
+    session = NativeWorkerWarmupSession(
+        [
+            UsageLimitExceeded("You exceeded your current quota, please check your plan and billing details."),
+            (200, b"ok", "models/gemini-3.1-flash-lite"),
+        ],
+        events=events,
+    )
+    capture_service = WarmupCaptureService(events=events)
+    try:
+        client._session = session
+        client._capture_service = capture_service
+        client._replay_service = WarmupReplayService()
+
+        asyncio.run(client.warmup_account_text_native())
+
+        assert session.worker_probe_calls == [
+            {"model": DEFAULT_WARMUP_TEXT_MODEL, "timeout_ms": 30000},
+            {"model": "gemini-3.1-flash-lite", "timeout_ms": 30000},
+        ]
+        assert session.ensure_context_calls == []
+        assert capture_service.warmup_calls == []
+        assert events == ["worker_probe", "worker_probe"]
+    finally:
+        client._session = None
+        if original_session is not None:
+            original_session._executor.shutdown(wait=False)
+
+
 def test_client_account_text_warmup_uses_dedicated_probe_timeout(monkeypatch):
     monkeypatch.setenv("AISTUDIO_WARMUP_PROBE_TIMEOUT_SECONDS", "240")
     monkeypatch.setattr(settings, "warmup_probe_timeout_seconds", 240)
@@ -381,6 +447,30 @@ def test_client_account_text_warmup_uses_dedicated_probe_timeout(monkeypatch):
 
 
 def test_client_account_text_warmup_keeps_native_worker_forbidden_as_auth_failure():
+    client = AIStudioClient(port=1)
+    original_session = client._session
+    session = NativeWorkerWarmupSession(
+        [(403, b'[[null,[7,"The caller does not have permission"]]]', f"models/{DEFAULT_WARMUP_TEXT_MODEL}")]
+    )
+    capture_service = WarmupCaptureService()
+    try:
+        client._session = session
+        client._capture_service = capture_service
+        client._replay_service = WarmupReplayService()
+
+        with pytest.raises(AuthError, match="GenerateContent permission check failed"):
+            asyncio.run(client.warmup_account_text_native())
+
+        assert session.worker_probe_calls == [{"model": DEFAULT_WARMUP_TEXT_MODEL, "timeout_ms": 30000}]
+        assert capture_service.warmup_calls == []
+    finally:
+        client._session = None
+        if original_session is not None:
+            original_session._executor.shutdown(wait=False)
+
+
+def test_client_account_text_warmup_does_not_fallback_on_forbidden_probe(monkeypatch):
+    monkeypatch.setenv("AISTUDIO_WARMUP_TEXT_MODEL_CANDIDATES", "gemini-3.1-flash-lite")
     client = AIStudioClient(port=1)
     original_session = client._session
     session = NativeWorkerWarmupSession(
@@ -456,6 +546,74 @@ def test_client_warmup_retries_next_authuser_route_after_native_model_selection_
         assert session.advance_calls == 1
         assert len(capture_service.warmup_calls) == 1
         assert len(session.probe_calls) == 2
+        assert events == ["probe", "probe", "ensure", "capture"]
+    finally:
+        client._session = None
+        if original_session is not None:
+            original_session._executor.shutdown(wait=False)
+
+
+def test_client_warmup_falls_back_to_next_model_candidate_after_native_model_selection_failure(monkeypatch):
+    monkeypatch.setenv("AISTUDIO_WARMUP_TEXT_MODEL_CANDIDATES", "gemini-3.1-flash-lite,gemini-3.5-flash")
+    client = AIStudioClient(port=1)
+    original_session = client._session
+    try:
+        events = []
+        session = NativeProbeWarmupSession(
+            [
+                ModelNotFoundError("AI Studio text model not selected during native GenerateContent permission probe"),
+                (200, b"ok", "models/gemini-3.1-flash-lite"),
+            ],
+            events=events,
+        )
+        capture_service = WarmupCaptureService(events=events)
+        client._session = session
+        client._capture_service = capture_service
+        client._replay_service = WarmupReplayService()
+
+        asyncio.run(client.warmup())
+
+        assert session.probe_calls == [
+            {"model": DEFAULT_WARMUP_TEXT_MODEL, "timeout_ms": 30000},
+            {"model": "gemini-3.1-flash-lite", "timeout_ms": 30000},
+        ]
+        assert session.advance_calls == 0
+        assert len(session.ensure_context_calls) == 1
+        assert capture_service.warmup_calls[0]["model"] == "gemini-3.1-flash-lite"
+        assert events == ["probe", "probe", "ensure", "capture"]
+    finally:
+        client._session = None
+        if original_session is not None:
+            original_session._executor.shutdown(wait=False)
+
+
+def test_client_warmup_falls_back_to_next_model_candidate_after_native_quota(monkeypatch):
+    monkeypatch.setenv("AISTUDIO_WARMUP_TEXT_MODEL_CANDIDATES", "gemini-3.1-flash-lite,gemini-3.5-flash")
+    client = AIStudioClient(port=1)
+    original_session = client._session
+    try:
+        events = []
+        session = NativeProbeWarmupSession(
+            [
+                UsageLimitExceeded("You exceeded your current quota, please check your plan and billing details."),
+                (200, b"ok", "models/gemini-3.1-flash-lite"),
+            ],
+            events=events,
+        )
+        capture_service = WarmupCaptureService(events=events)
+        client._session = session
+        client._capture_service = capture_service
+        client._replay_service = WarmupReplayService()
+
+        asyncio.run(client.warmup())
+
+        assert session.probe_calls == [
+            {"model": DEFAULT_WARMUP_TEXT_MODEL, "timeout_ms": 30000},
+            {"model": "gemini-3.1-flash-lite", "timeout_ms": 30000},
+        ]
+        assert session.advance_calls == 0
+        assert len(session.ensure_context_calls) == 1
+        assert capture_service.warmup_calls[0]["model"] == "gemini-3.1-flash-lite"
         assert events == ["probe", "probe", "ensure", "capture"]
     finally:
         client._session = None

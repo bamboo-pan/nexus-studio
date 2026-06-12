@@ -14,6 +14,7 @@ load_dotenv()
 
 DEFAULT_TEXT_MODEL = os.getenv("AISTUDIO_DEFAULT_TEXT_MODEL", "gemma-4-31b-it")
 DEFAULT_WARMUP_TEXT_MODEL = os.getenv("AISTUDIO_WARMUP_TEXT_MODEL", "gemini-3-flash-preview")
+DEFAULT_WARMUP_TEXT_MODEL_CANDIDATES = os.getenv("AISTUDIO_WARMUP_TEXT_MODEL_CANDIDATES", "")
 DEFAULT_IMAGE_MODEL = os.getenv("AISTUDIO_DEFAULT_IMAGE_MODEL", "gemini-3.1-flash-image-preview")
 DEFAULT_CAMOUFOX_PORT = 9222
 DEFAULT_RUNTIME_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
@@ -85,6 +86,7 @@ class Settings:
     # 账号轮询配置
     account_rotation_mode: str = os.getenv("AISTUDIO_ACCOUNT_ROTATION_MODE", "round_robin")  # round_robin, lru, least_rl, exhaustion
     account_cooldown_seconds: int = int(os.getenv("AISTUDIO_ACCOUNT_COOLDOWN_SECONDS", "60"))
+    account_quota_exhausted_cooldown_seconds: int = int(os.getenv("AISTUDIO_ACCOUNT_QUOTA_EXHAUSTED_COOLDOWN_SECONDS", "21600"))
     account_max_retries: int = int(os.getenv("AISTUDIO_ACCOUNT_MAX_RETRIES", "3"))
     account_warmup_limit: int = int(os.getenv("AISTUDIO_ACCOUNT_WARMUP_LIMIT", "2"))
     max_concurrency: int = int(os.getenv("AISTUDIO_MAX_CONCURRENCY", "3"))

@@ -225,6 +225,15 @@ class AccountRotator:
                 available.append((account, stats))
         return available
 
+    def _cooldown_wait_accounts(self, *, exclude_account_id: str | None = None) -> list[AccountMeta]:
+        accounts: list[AccountMeta] = []
+        for account in self._store.list_accounts():
+            if account.id == exclude_account_id:
+                continue
+            if account.health_status == "rate_limited" or not account.is_isolated:
+                accounts.append(account)
+        return accounts
+
     def model_prefers_premium(self, model: str | None) -> bool:
         if not model:
             return False
@@ -367,7 +376,7 @@ class AccountRotator:
                 if require_preferred and self.model_prefers_premium(model):
                     return None
                 # 所有账号都在冷却期，找一个冷却时间最短的
-                all_accounts = [account for account in self._store.list_accounts() if not account.is_isolated and account.id != exclude_account_id]
+                all_accounts = self._cooldown_wait_accounts(exclude_account_id=exclude_account_id)
                 if not all_accounts:
                     self.last_selection_reason = "no healthy accounts are available"
                     return None
@@ -408,7 +417,7 @@ class AccountRotator:
             if not available:
                 if require_preferred and self.model_prefers_premium(model):
                     return None
-                all_accounts = [account for account in self._store.list_accounts() if not account.is_isolated and account.id != exclude_account_id]
+                all_accounts = self._cooldown_wait_accounts(exclude_account_id=exclude_account_id)
                 if not all_accounts:
                     self.last_selection_reason = "no healthy accounts are available"
                     return None
@@ -440,7 +449,7 @@ class AccountRotator:
             if not available:
                 if require_preferred and self.model_prefers_premium(model):
                     return None
-                all_accounts = [account for account in self._store.list_accounts() if not account.is_isolated and account.id != exclude_account_id]
+                all_accounts = self._cooldown_wait_accounts(exclude_account_id=exclude_account_id)
                 if not all_accounts:
                     self.last_selection_reason = "no healthy accounts are available"
                     return None
@@ -500,19 +509,33 @@ class AccountRotator:
         self._stats[account_id].record_success(image_size=image_size, image_count=image_count)
         self._store.set_account_health(account_id, "healthy", "last request succeeded")
 
-    def record_rate_limited(self, account_id: str) -> None:
+    def record_rate_limited(
+        self,
+        account_id: str,
+        *,
+        cooldown_seconds: int | None = None,
+        reason: str | None = None,
+        quota_exhausted: bool = False,
+    ) -> None:
         """记录 429 限流。"""
         if account_id not in self._stats:
             self._stats[account_id] = AccountStats(account_id=account_id)
-        self._stats[account_id].record_rate_limited(self._cooldown_seconds)
+        effective_cooldown_seconds = self._cooldown_seconds if cooldown_seconds is None else cooldown_seconds
+        self._stats[account_id].record_rate_limited(effective_cooldown_seconds)
         cooldown_until = datetime.fromtimestamp(self._stats[account_id].cooldown_until, tz=timezone.utc).isoformat()
+        status = "quota_exhausted" if quota_exhausted else "rate_limited"
+        health_reason = reason or (
+            "upstream quota is exhausted; account is paused until quota resets"
+            if quota_exhausted
+            else "upstream returned rate limit; account is cooling down"
+        )
         self._store.set_account_health(
             account_id,
-            "rate_limited",
-            "upstream returned rate limit; account is cooling down",
+            status,
+            health_reason,
             isolated_until=cooldown_until,
         )
-        logger.warning("Account was rate-limited; cooling down for %ds", self._cooldown_seconds)
+        logger.warning("Account was %s; cooling down for %ds", status, effective_cooldown_seconds)
 
     def record_error(self, account_id: str) -> None:
         """记录错误。"""

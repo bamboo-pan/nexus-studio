@@ -74,6 +74,8 @@ def _request_error_requires_restart(exc: BaseException) -> bool:
     restart_markers = (
         "ai studio chat runtime not ready",
         "ai studio image runtime not ready",
+        "ai studio text model not selected in native ui sender",
+        "current_text_model_not_found",
         "native ui sender timeout",
         "page.goto: timeout",
         "navigation timeout",
@@ -325,8 +327,12 @@ class NativeUiWorkerPool:
                     )
                     if status not in retry_status_set:
                         release_as_recent = True
-                        return status, raw, dict(result)
-                    last_retry_response = (status, raw, dict(result))
+                        metadata = dict(result)
+                        metadata["worker_index"] = getattr(worker, "index", None)
+                        return status, raw, metadata
+                    retry_metadata = dict(result)
+                    retry_metadata["worker_index"] = getattr(worker, "index", None)
+                    last_retry_response = (status, raw, retry_metadata)
                     release_as_recent = False
                     if status_attempt_index + 1 < status_attempts_per_worker:
                         log.warning(

@@ -26,7 +26,7 @@ BACKUP_WARNING = (
 )
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
 ACCOUNT_TIERS = {"free", "pro", "ultra"}
-ACCOUNT_HEALTH_STATUSES = {"unknown", "healthy", "rate_limited", "isolated", "expired", "missing_auth", "error"}
+ACCOUNT_HEALTH_STATUSES = {"unknown", "healthy", "rate_limited", "quota_exhausted", "isolated", "expired", "missing_auth", "error"}
 AI_STUDIO_GENERATE_READY_ERROR = (
     "credential storage state must include AI Studio browser storage; re-login or import "
     "a Playwright storage state captured after AI Studio fully loads"
@@ -158,6 +158,13 @@ class AccountMeta:
                 return datetime.fromisoformat(self.isolated_until) > datetime.now(timezone.utc)
             except ValueError:
                 return False
+        if self.health_status == "quota_exhausted":
+            if not self.isolated_until:
+                return True
+            try:
+                return datetime.fromisoformat(self.isolated_until) > datetime.now(timezone.utc)
+            except ValueError:
+                return True
         if self.health_status != "isolated":
             return False
         if not self.isolated_until:

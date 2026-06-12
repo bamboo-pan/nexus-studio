@@ -228,6 +228,14 @@ def test_static_frontend_exposes_provider_manager_page_without_token_state():
     assert ".provider-audit-card" in style_css
 
 
+def test_static_frontend_exposes_quota_exhausted_account_health_state():
+    app_js = (ROOT / "src" / "aistudio_api" / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "'quota_exhausted','isolated'" in app_js
+    assert "quota_exhausted:'额度耗尽'" in app_js
+    assert "'rate_limited','quota_exhausted','isolated'" in app_js
+
+
 def test_static_frontend_exposes_playground_workbench_tools():
     app_js = (ROOT / "src" / "aistudio_api" / "static" / "app.js").read_text(encoding="utf-8")
     index_html = (ROOT / "src" / "aistudio_api" / "static" / "index.html").read_text(encoding="utf-8")
@@ -622,6 +630,7 @@ def test_static_frontend_exposes_image_prompt_templates_and_optimizer():
     assert "explicit&&item?.path" in app_js
     assert "attachImageReferences($event)" in index_html
     assert "imageEditReferences" in app_js
+    assert "const seen=new Set();return refs.filter" in app_js
     assert "imageRequestImages" in app_js
     assert "body.images=images" in app_js
     assert "setBaseImage(item)" in index_html

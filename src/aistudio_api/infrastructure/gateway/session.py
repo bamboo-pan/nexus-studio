@@ -17,7 +17,7 @@ from urllib.parse import quote, urlparse
 
 from aistudio_api.config import camoufox_proxy_identity_options, settings
 from aistudio_api.domain.errors import ModelNotFoundError, RequestError
-from aistudio_api.infrastructure.gateway.native_ui_worker_pool import NativeUiWorkerError, NativeUiWorkerPool
+from aistudio_api.infrastructure.gateway.native_ui_worker_pool import NativeUiWorkerError, NativeUiWorkerPool, NativeUiWorkerRequestError
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
 
 log = logging.getLogger("aistudio.session")
@@ -27,8 +27,34 @@ class _NativeUiReplayUnsupported(RuntimeError):
     pass
 
 
+def _is_per_user_quota_ambiguous_response(status: int, raw: bytes | str | None) -> bool:
+    if int(status or 0) != 404:
+        return False
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8", errors="replace")
+    else:
+        text = str(raw or "")
+    lower_text = text.lower()
+    return "ambiguous request" in lower_text and "streamgeneratecontentperuserquota" in lower_text
+
+
 def _native_worker_unavailable_error(exc: BaseException) -> RequestError:
     return RequestError(503, f"native UI worker unavailable: {exc}")
+
+
+def _native_worker_warmup_error_is_recoverable(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "ai studio text model not selected in native ui sender",
+            "current_text_model_not_found",
+            "text_category",
+            "elementhandle.click: timeout",
+            "element is not enabled",
+            "waiting for element to be visible, enabled and stable",
+        )
+    )
 
 AI_STUDIO_URL = "https://aistudio.google.com/u/2/prompts/new_chat"
 AI_STUDIO_URL_FALLBACK = "https://aistudio.google.com/u/0/prompts/new_chat"
@@ -1254,6 +1280,10 @@ class BrowserSession:
             if (status == 204 or raw_len == 0) and len(observed_responses) < 5:
                 observed_responses.append(f"{response_url} status={status} body={raw_len}")
                 return
+            if _is_per_user_quota_ambiguous_response(status, raw):
+                if len(observed_responses) < 5:
+                    observed_responses.append(f"{response_url} status={status} per_user_quota_ambiguous=true")
+                return
             response_holder["status"] = status
             response_holder["body"] = raw
 
@@ -1409,20 +1439,37 @@ class BrowserSession:
         last_status = 0
         last_raw = b""
         last_wire_model = ""
-        for _ in range(max(1, pool.worker_count)):
-            status, raw, metadata = pool.send_with_metadata(
-                model=model,
-                prompt="1",
-                timeout_ms=timeout_ms,
-                max_attempts=1,
-                retry_statuses=(401, 403),
-                prefer_recent_worker=False,
-            )
+        required_successes = max(1, pool.worker_count)
+        max_probe_attempts = required_successes * 2
+        successful_worker_indexes: set[object] = set()
+        last_recoverable_error: NativeUiWorkerRequestError | None = None
+        for _ in range(max_probe_attempts):
+            try:
+                status, raw, metadata = pool.send_with_metadata(
+                    model=model,
+                    prompt="1",
+                    timeout_ms=timeout_ms,
+                    max_attempts=1,
+                    retry_statuses=(401, 403),
+                    prefer_recent_worker=False,
+                )
+            except NativeUiWorkerRequestError as exc:
+                if _native_worker_warmup_error_is_recoverable(exc):
+                    last_recoverable_error = exc
+                    log.warning("Native UI worker warmup probe recovered by trying another worker: %s", exc)
+                    continue
+                raise
             last_status = status
             last_raw = raw
             last_wire_model = str(metadata.get("wire_model") or "")
             if status != 200:
                 return status, raw, last_wire_model
+            worker_index = metadata.get("worker_index")
+            successful_worker_indexes.add(worker_index if worker_index is not None else len(successful_worker_indexes))
+            if len(successful_worker_indexes) >= required_successes:
+                return last_status, last_raw, last_wire_model
+        if last_recoverable_error is not None:
+            raise last_recoverable_error
         return last_status, last_raw, last_wire_model
 
     def _native_worker_pool_sync(self) -> NativeUiWorkerPool:
@@ -1570,6 +1617,10 @@ class BrowserSession:
             raw_len = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw or b"")
             if (status == 204 or raw_len == 0) and len(observed_responses) < 5:
                 observed_responses.append(f"{response_url} status={status} body={raw_len} model={wire_model}")
+                return
+            if _is_per_user_quota_ambiguous_response(status, raw):
+                if len(observed_responses) < 5:
+                    observed_responses.append(f"{response_url} status={status} per_user_quota_ambiguous=true model={wire_model}")
                 return
             if status >= 400:
                 log.info(

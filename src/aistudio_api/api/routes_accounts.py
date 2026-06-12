@@ -271,9 +271,6 @@ async def activate_account(
     )
     if account is None:
         raise HTTPException(status_code=404, detail=_error_detail("账号不存在或切换失败", "not_found"))
-    account_client_pool = getattr(runtime_state, "account_client_pool", None)
-    if account_client_pool is not None:
-        await account_client_pool.invalidate(account.id)
     return _to_account_response(account)
 
 

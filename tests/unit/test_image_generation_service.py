@@ -134,6 +134,27 @@ class FakeEmptyThenSuccessImageClient(FakeImageClient):
         return await super().generate_image(**kwargs)
 
 
+class FakeNetworkThenSuccessImageClient(FakeImageClient):
+    def __init__(self):
+        super().__init__()
+        self.clear_calls = 0
+
+    def clear_capture_state(self):
+        self.clear_calls += 1
+
+    async def generate_image(self, *, prompt, model, generation_config_overrides=None, images=None, timeout=_UNSET):
+        if not self.calls:
+            call = {"prompt": prompt, "model": model, "generation_config_overrides": generation_config_overrides, "images": images}
+            if timeout is not _UNSET:
+                call["timeout"] = timeout
+            self.calls.append(call)
+            raise RequestError(0, "APIRequestContext.post: connect ENETUNREACH 2404:6800:4005:81b::200a:443")
+        kwargs = {"prompt": prompt, "model": model, "generation_config_overrides": generation_config_overrides, "images": images}
+        if timeout is not _UNSET:
+            kwargs["timeout"] = timeout
+        return await super().generate_image(**kwargs)
+
+
 class FakeChatClient:
     def __init__(self):
         self.calls = []
@@ -554,6 +575,24 @@ def test_image_generation_retries_empty_image_response_with_fresh_capture(tmp_pa
     assert response["data"][0]["b64_json"]
     assert client.clear_calls == 1
     assert len(client.calls) == 2
+    assert account_stats["requests"] == 1
+    assert account_stats["success"] == 1
+    assert account_stats["errors"] == 0
+
+
+def test_image_generation_retries_transient_replay_network_error_with_fresh_capture(tmp_path):
+    account, service, rotator = account_runtime(tmp_path / "accounts")
+    client = FakeNetworkThenSuccessImageClient()
+    req = ImageRequest(prompt="draw", model="gemini-3.1-flash-image-preview", timeout=240)
+
+    response = run_with_runtime(handle_image_generation(req, client), account_service=service, rotator=rotator)
+
+    account_stats = rotator.get_all_stats()[account.id]
+    assert response["data"][0]["b64_json"]
+    assert client.clear_calls == 1
+    assert len(client.calls) == 2
+    assert client.calls[0]["timeout"] == 240
+    assert client.calls[1]["timeout"] == 240
     assert account_stats["requests"] == 1
     assert account_stats["success"] == 1
     assert account_stats["errors"] == 0

@@ -812,6 +812,7 @@ def test_stream_chat_ignores_removed_local_request_cache(tmp_path, monkeypatch):
     assert second.headers["x-accel-buffering"] == "no"
     assert captured["streams"] == 2
     assert any(delta.get("content") == "stream cached" for delta in deltas)
+    assert completed["request"]["stream"] is True
     assert "cache" not in completed
     assert "cache" not in completed["conversation"]["messages"][-1]
 
@@ -1054,6 +1055,7 @@ def test_stream_chat_persists_responses_reasoning_summary(tmp_path, monkeypatch)
     assistant = completed["conversation"]["messages"][-1]
 
     assert response.status_code == 200
+    assert completed["request"]["reasoning"] == {"effort": "high", "summary": "auto"}
     assert assistant["content"] == "Answer"
     assert assistant["thinking"] == "I will calculate."
 

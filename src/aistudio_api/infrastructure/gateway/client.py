@@ -8,8 +8,8 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from aistudio_api.config import DEFAULT_CAMOUFOX_PORT, DEFAULT_IMAGE_MODEL, DEFAULT_TEXT_MODEL, DEFAULT_WARMUP_TEXT_MODEL, settings
-from aistudio_api.domain.errors import AuthError, ModelNotFoundError, RequestError, classify_error
+from aistudio_api.config import DEFAULT_CAMOUFOX_PORT, DEFAULT_IMAGE_MODEL, DEFAULT_TEXT_MODEL, DEFAULT_WARMUP_TEXT_MODEL, DEFAULT_WARMUP_TEXT_MODEL_CANDIDATES, settings
+from aistudio_api.domain.errors import AuthError, ModelNotFoundError, RequestError, UsageLimitExceeded, classify_error
 from aistudio_api.domain.models import ModelOutput, parse_image_output, parse_text_output
 from aistudio_api.infrastructure.cache.snapshot_cache import SnapshotCache
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest, RequestCaptureService
@@ -86,6 +86,50 @@ def _expected_wire_model(model: str) -> str:
     if not wire_model.startswith("models/"):
         wire_model = f"models/{wire_model}"
     return wire_model
+
+
+def _split_model_candidates(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    normalized = raw.replace(";", ",").replace("\n", ",")
+    return [candidate.strip() for candidate in normalized.split(",") if candidate.strip()]
+
+
+def _warmup_text_model_candidates() -> list[str]:
+    candidates: list[str] = [DEFAULT_WARMUP_TEXT_MODEL]
+    candidates.extend(_split_model_candidates(os.getenv("AISTUDIO_WARMUP_TEXT_MODEL_CANDIDATES", DEFAULT_WARMUP_TEXT_MODEL_CANDIDATES)))
+    candidates.extend(_split_model_candidates(os.getenv("SYSTEM_TEST_MODEL_CANDIDATES", "")))
+    deduped: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in deduped:
+            deduped.append(candidate)
+    return deduped or [DEFAULT_WARMUP_TEXT_MODEL]
+
+
+def _warmup_model_unavailable_error(exc: BaseException) -> bool:
+    if isinstance(exc, ModelNotFoundError):
+        return True
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "ai studio text model not selected",
+            "text model not selected",
+            "text_model_not_found",
+            "current_text_model_not_found",
+            "not_text_model",
+        )
+    )
+
+
+def _warmup_model_candidate_fallback_error(exc: BaseException) -> bool:
+    return _warmup_model_unavailable_error(exc) or isinstance(exc, UsageLimitExceeded)
+
+
+def _raise_warmup_model_candidates_exhausted(last_model_error: BaseException | None) -> None:
+    if isinstance(last_model_error, UsageLimitExceeded):
+        raise last_model_error
+    raise ModelNotFoundError("AI Studio warmup could not select any configured text model") from last_model_error
 
 
 def image_replay_model_id(model: str) -> str:
@@ -178,19 +222,30 @@ class AIStudioClient:
             await self.warmup()
             return
         timeout_seconds = _configured_warmup_probe_timeout_seconds()
-        logger.info(
-            "AI Studio account warmup: probing native UI worker pool for model=%s",
-            DEFAULT_WARMUP_TEXT_MODEL,
-        )
-        status, raw, wire_model = await probe_worker(model=DEFAULT_WARMUP_TEXT_MODEL, timeout_ms=timeout_seconds * 1000)
-        self._validate_generate_content_probe_result(
-            model=DEFAULT_WARMUP_TEXT_MODEL,
-            status=status,
-            raw=raw,
-            wire_model=wire_model,
-            source="Native UI worker warmup",
-        )
-        logger.info("AI Studio account warmup: native UI worker pool is ready")
+        last_model_error: BaseException | None = None
+        for warmup_model in _warmup_text_model_candidates():
+            logger.info(
+                "AI Studio account warmup: probing native UI worker pool for model=%s",
+                warmup_model,
+            )
+            try:
+                status, raw, wire_model = await probe_worker(model=warmup_model, timeout_ms=timeout_seconds * 1000)
+                self._validate_generate_content_probe_result(
+                    model=warmup_model,
+                    status=status,
+                    raw=raw,
+                    wire_model=wire_model,
+                    source="Native UI worker warmup",
+                )
+                logger.info("AI Studio account warmup: native UI worker pool is ready for model=%s", warmup_model)
+                return
+            except Exception as exc:
+                if not _warmup_model_candidate_fallback_error(exc):
+                    raise
+                last_model_error = exc
+                self.clear_capture_state()
+                logger.warning("AI Studio account warmup model unavailable or quota-limited; trying next candidate: model=%s error=%s", warmup_model, exc)
+        _raise_warmup_model_candidates_exhausted(last_model_error)
 
     async def _warmup_with_authuser_failover(
         self,
@@ -203,28 +258,47 @@ class AIStudioClient:
         if self._session is None:
             return
         last_auth_error: AuthError | None = None
+        last_model_error: BaseException | None = None
         while True:
             probe_native = getattr(self._session, "probe_native_generate_content", None)
             if callable(probe_native):
-                logger.info(
-                    "AI Studio warmup: probing native GenerateContent permission for model=%s before template capture",
-                    DEFAULT_WARMUP_TEXT_MODEL,
-                )
-                try:
-                    await self._probe_generate_content_permission(None, model=DEFAULT_WARMUP_TEXT_MODEL)
-                    logger.info("AI Studio warmup: GenerateContent permission probe passed")
-                except (AuthError, ModelNotFoundError) as exc:
-                    last_auth_error = exc
-                    self.clear_capture_state()
-                    advance = getattr(self._session, "advance_chat_route_after_auth_failure", None)
-                    if not callable(advance) or not await advance():
-                        raise last_auth_error
-                    logger.info("AI Studio GenerateContent probe failed for current authuser route; trying next candidate: %s", exc)
+                selected_warmup_model = ""
+                route_advanced = False
+                for warmup_model in _warmup_text_model_candidates():
+                    logger.info(
+                        "AI Studio warmup: probing native GenerateContent permission for model=%s before template capture",
+                        warmup_model,
+                    )
+                    try:
+                        await self._probe_generate_content_permission(None, model=warmup_model)
+                        logger.info("AI Studio warmup: GenerateContent permission probe passed for model=%s", warmup_model)
+                        selected_warmup_model = warmup_model
+                        break
+                    except (ModelNotFoundError, UsageLimitExceeded) as exc:
+                        last_model_error = exc
+                        self.clear_capture_state()
+                        logger.info("AI Studio warmup model unavailable or quota-limited for current authuser route; trying next model: %s", exc)
+                        continue
+                    except AuthError as exc:
+                        last_auth_error = exc
+                        self.clear_capture_state()
+                        advance = getattr(self._session, "advance_chat_route_after_auth_failure", None)
+                        if not callable(advance) or not await advance():
+                            raise last_auth_error
+                        logger.info("AI Studio GenerateContent probe failed for current authuser route; trying next authuser candidate: %s", exc)
+                        route_advanced = True
+                        break
+                if route_advanced:
                     continue
+                if not selected_warmup_model:
+                    advance = getattr(self._session, "advance_chat_route_after_auth_failure", None)
+                    if callable(advance) and await advance():
+                        continue
+                    _raise_warmup_model_candidates_exhausted(last_model_error)
 
                 logger.info(
                     "AI Studio warmup: ensuring browser context for model=%s",
-                    DEFAULT_WARMUP_TEXT_MODEL,
+                    selected_warmup_model,
                 )
                 await self._session.ensure_context(
                     navigation_timeout_ms=navigation_timeout_ms,
@@ -232,11 +306,11 @@ class AIStudioClient:
                 )
                 logger.info(
                     "AI Studio warmup: capturing native template for model=%s",
-                    DEFAULT_WARMUP_TEXT_MODEL,
+                    selected_warmup_model,
                 )
                 await self._capture_service.warmup(
                     prompt="1",
-                    model=DEFAULT_WARMUP_TEXT_MODEL,
+                    model=selected_warmup_model,
                     rewrite_body=False,
                     retry_template_capture=False,
                     navigation_timeout_ms=navigation_timeout_ms,
@@ -247,44 +321,59 @@ class AIStudioClient:
                 )
                 return
 
-            logger.info(
-                "AI Studio warmup: ensuring browser context for model=%s",
-                DEFAULT_WARMUP_TEXT_MODEL,
-            )
-            await self._session.ensure_context(
-                navigation_timeout_ms=navigation_timeout_ms,
-                chat_ready_timeout_ms=chat_ready_timeout_ms,
-            )
-            logger.info(
-                "AI Studio warmup: capturing native template for model=%s",
-                DEFAULT_WARMUP_TEXT_MODEL,
-            )
-            captured = await self._capture_service.warmup(
-                prompt="1",
-                model=DEFAULT_WARMUP_TEXT_MODEL,
-                rewrite_body=False,
-                retry_template_capture=False,
-                navigation_timeout_ms=navigation_timeout_ms,
-                chat_ready_timeout_ms=chat_ready_timeout_ms,
-                botguard_timeout_ms=botguard_timeout_ms,
-                template_capture_timeout_ms=template_capture_timeout_ms,
-                template_recovery_attempts=1,
-            )
-            logger.info(
-                "AI Studio warmup: probing GenerateContent permission for model=%s",
-                DEFAULT_WARMUP_TEXT_MODEL,
-            )
-            try:
-                await self._probe_generate_content_permission(captured, model=DEFAULT_WARMUP_TEXT_MODEL)
-                logger.info("AI Studio warmup: GenerateContent permission probe passed")
-                return
-            except AuthError as exc:
-                last_auth_error = exc
-                self.clear_capture_state()
-                advance = getattr(self._session, "advance_chat_route_after_auth_failure", None)
-                if not callable(advance) or not await advance():
-                    raise last_auth_error
-                logger.info("AI Studio GenerateContent probe failed for current authuser route; trying next candidate")
+            route_advanced = False
+            for warmup_model in _warmup_text_model_candidates():
+                logger.info(
+                    "AI Studio warmup: ensuring browser context for model=%s",
+                    warmup_model,
+                )
+                await self._session.ensure_context(
+                    navigation_timeout_ms=navigation_timeout_ms,
+                    chat_ready_timeout_ms=chat_ready_timeout_ms,
+                )
+                logger.info(
+                    "AI Studio warmup: capturing native template for model=%s",
+                    warmup_model,
+                )
+                try:
+                    captured = await self._capture_service.warmup(
+                        prompt="1",
+                        model=warmup_model,
+                        rewrite_body=False,
+                        retry_template_capture=False,
+                        navigation_timeout_ms=navigation_timeout_ms,
+                        chat_ready_timeout_ms=chat_ready_timeout_ms,
+                        botguard_timeout_ms=botguard_timeout_ms,
+                        template_capture_timeout_ms=template_capture_timeout_ms,
+                        template_recovery_attempts=1,
+                    )
+                    logger.info(
+                        "AI Studio warmup: probing GenerateContent permission for model=%s",
+                        warmup_model,
+                    )
+                    await self._probe_generate_content_permission(captured, model=warmup_model)
+                    logger.info("AI Studio warmup: GenerateContent permission probe passed for model=%s", warmup_model)
+                    return
+                except (ModelNotFoundError, UsageLimitExceeded) as exc:
+                    last_model_error = exc
+                    self.clear_capture_state()
+                    logger.info("AI Studio warmup model unavailable or quota-limited for current authuser route; trying next model: %s", exc)
+                    continue
+                except AuthError as exc:
+                    last_auth_error = exc
+                    self.clear_capture_state()
+                    advance = getattr(self._session, "advance_chat_route_after_auth_failure", None)
+                    if not callable(advance) or not await advance():
+                        raise last_auth_error
+                    logger.info("AI Studio GenerateContent probe failed for current authuser route; trying next candidate")
+                    route_advanced = True
+                    break
+            if route_advanced:
+                continue
+            advance = getattr(self._session, "advance_chat_route_after_auth_failure", None)
+            if callable(advance) and await advance():
+                continue
+            _raise_warmup_model_candidates_exhausted(last_model_error)
 
     async def _probe_generate_content_permission(self, captured: CapturedRequest | None, *, model: str) -> None:
         probe_native = getattr(self._session, "probe_native_generate_content", None)

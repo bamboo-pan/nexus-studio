@@ -183,6 +183,9 @@ def test_warmup_retry_classifies_navigation_timeout_only_as_transient():
         RuntimeError("native UI worker pool request failed after retry: TargetClosedError: Page.wait_for_timeout: Target page, context or browser has been closed")
     ) is True
     assert _is_transient_warmup_error(RuntimeError("native UI worker pool request failed after retry: RuntimeError: native UI sender timeout; observed=[]")) is True
+    assert _is_transient_warmup_error(
+        RuntimeError("native UI worker pool request failed after retry: TimeoutError: ElementHandle.click: Timeout 30000ms exceeded; element is not enabled")
+    ) is True
     assert _is_transient_warmup_error(RuntimeError("Google sign-in auth state is missing or invalid")) is False
     assert _is_transient_warmup_error(RuntimeError("GenerateContent permission denied. Please try again.")) is False
     assert _is_transient_warmup_error(RuntimeError("invalid account auth message")) is False
@@ -580,6 +583,60 @@ def test_balanced_selection_spreads_concurrent_leases(tmp_path):
     assert stats[second.id]["in_flight"] == 1
 
 
+def test_acquire_waits_for_only_remaining_rate_limited_account(tmp_path, monkeypatch):
+    store = AccountStore(accounts_dir=tmp_path)
+    limited = store.save_account("limited", None, storage_state(cookie_name="sid1"))
+    hard_isolated = store.save_account("hard", None, storage_state(cookie_name="sid2"), activate=False)
+    store.isolate_account(hard_isolated.id, "GenerateContent permission failed")
+    rotator = AccountRotator(store, cooldown_seconds=30)
+    rotator.record_rate_limited(limited.id)
+    sleeps = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr("aistudio_api.application.account_rotator.asyncio.sleep", fake_sleep)
+
+    async def acquire_once():
+        lease = await rotator.acquire_account("gemini-3-flash-preview")
+        try:
+            return lease.account.id, rotator.get_all_stats()
+        finally:
+            await lease.release()
+
+    picked_id, stats = asyncio.run(acquire_once())
+
+    assert picked_id == limited.id
+    assert 0 < sleeps[0] <= 30
+    assert stats[limited.id]["in_flight"] == 1
+    assert store.get_account(hard_isolated.id).is_isolated is True
+
+
+def test_acquire_does_not_wait_for_quota_exhausted_account(tmp_path, monkeypatch):
+    store = AccountStore(accounts_dir=tmp_path)
+    exhausted = store.save_account("exhausted", None, storage_state(cookie_name="sid1"))
+    hard_isolated = store.save_account("hard", None, storage_state(cookie_name="sid2"), activate=False)
+    store.isolate_account(hard_isolated.id, "GenerateContent permission failed")
+    rotator = AccountRotator(store, cooldown_seconds=30)
+    rotator.record_rate_limited(
+        exhausted.id,
+        cooldown_seconds=7200,
+        quota_exhausted=True,
+        reason="upstream quota is exhausted; account is paused until quota resets",
+    )
+
+    async def fake_sleep(delay):
+        raise AssertionError(f"quota exhausted account should not be waited on: {delay}")
+
+    monkeypatch.setattr("aistudio_api.application.account_rotator.asyncio.sleep", fake_sleep)
+
+    lease = asyncio.run(rotator.acquire_account("gemini-3-flash-preview"))
+
+    assert lease is None
+    assert store.get_account(exhausted.id).health_status == "quota_exhausted"
+    assert store.get_account(exhausted.id).is_isolated is True
+
+
 def test_balanced_selection_keeps_affinity_when_not_overloaded(tmp_path):
     store = AccountStore(accounts_dir=tmp_path)
     first = store.save_account("first", None, storage_state(cookie_name="sid1"))
@@ -696,6 +753,7 @@ class FakeChatClient:
 class FakePooledChatClient:
     clients = []
     fail_for_accounts: set[str] = set()
+    daily_quota_for_accounts: set[str] = set()
     auth_fail_for_accounts: set[str] = set()
 
     def __init__(self, **kwargs):
@@ -722,6 +780,12 @@ class FakePooledChatClient:
         if self.account_id in FakePooledChatClient.fail_for_accounts:
             FakePooledChatClient.fail_for_accounts.remove(self.account_id)
             raise UsageLimitExceeded("quota exhausted")
+        if self.account_id in FakePooledChatClient.daily_quota_for_accounts:
+            FakePooledChatClient.daily_quota_for_accounts.remove(self.account_id)
+            raise UsageLimitExceeded(
+                "You exceeded your current quota, please check your plan and billing details. "
+                "For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits."
+            )
         return ModelOutput(
             candidates=[Candidate(text=f"ok:{self.account_id}")],
             usage={"total_tokens": 1},
@@ -909,10 +973,48 @@ def test_chat_pool_retry_excludes_rate_limited_account(tmp_path):
 
     stats = rotator.get_all_stats()
     assert response["choices"][0]["message"]["content"] == f"ok:{second.id}"
+    assert store.get_account(first.id).health_status == "rate_limited"
     assert stats[first.id]["rate_limited"] == 1
     assert stats[second.id]["requests"] == 1
     assert stats[first.id]["in_flight"] == 0
     assert stats[second.id]["in_flight"] == 0
+
+
+def test_chat_pool_marks_daily_quota_exhausted_and_retries_account(tmp_path, monkeypatch):
+    FakePooledChatClient.clients = []
+    FakePooledChatClient.fail_for_accounts = set()
+    FakePooledChatClient.daily_quota_for_accounts = set()
+    store = AccountStore(accounts_dir=tmp_path)
+    first = store.save_account("first", None, storage_state(cookie_name="sid1"))
+    second = store.save_account("second", None, storage_state(cookie_name="sid2"), activate=False)
+    FakePooledChatClient.daily_quota_for_accounts = {first.id}
+    monkeypatch.setattr(settings, "account_quota_exhausted_cooldown_seconds", 7200)
+    account_service = AccountService(store, LoginService())
+    rotator = AccountRotator(store, cooldown_seconds=30)
+    pool = AccountClientPool(store, client_factory=FakePooledChatClient)
+
+    async def call_chat_once():
+        return await handle_chat(
+            ChatRequest(model="gemini-3-flash-preview", messages=[Message(role="user", content="hello")]),
+            runtime_state.client,
+        )
+
+    response = run_with_account_pool(
+        call_chat_once(),
+        account_service=account_service,
+        rotator=rotator,
+        account_client_pool=pool,
+    )
+
+    stats = rotator.get_all_stats()
+    exhausted = store.get_account(first.id)
+    assert response["choices"][0]["message"]["content"] == f"ok:{second.id}"
+    assert exhausted.health_status == "quota_exhausted"
+    assert exhausted.is_isolated is True
+    assert "quota is exhausted" in exhausted.health_reason
+    assert stats[first.id]["rate_limited"] == 1
+    assert stats[first.id]["cooldown_remaining"] > 60
+    assert stats[second.id]["requests"] == 1
 
 
 def test_chat_pool_preserves_auth_error_when_retry_has_no_account(tmp_path):

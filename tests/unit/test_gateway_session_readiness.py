@@ -9,7 +9,7 @@ from aistudio_api.config import settings
 from aistudio_api.domain.errors import ModelNotFoundError, RequestError
 from aistudio_api.infrastructure.account import tier_detector
 from aistudio_api.infrastructure.account.tier_detector import AccountTier, TierResult
-from aistudio_api.infrastructure.gateway.native_ui_worker_pool import NativeUiWorkerProcessError
+from aistudio_api.infrastructure.gateway.native_ui_worker_pool import NativeUiWorkerProcessError, NativeUiWorkerRequestError
 from aistudio_api.infrastructure.gateway.session import (
     AI_STUDIO_CURRENT_TEXT_MODEL_JS,
     AI_STUDIO_URL,
@@ -1156,6 +1156,146 @@ def test_probe_native_worker_generate_content_retries_permission_statuses(tmp_pa
             "prefer_recent_worker": False,
         }
     ]
+
+
+def test_probe_native_worker_generate_content_continues_after_recoverable_model_selection_failure(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    calls = []
+    results = [
+        NativeUiWorkerRequestError(
+            "native UI worker pool request failed after retry: RuntimeError: "
+            "AI Studio text model not selected in native UI sender: gemini-3.5-flash; "
+            "current={'matches': False, 'reason': 'current_text_model_not_found'} "
+            "opened={'opened': True, 'type': 'text_category'}"
+        ),
+        (200, b"worker-one-ok", {"wire_model": "models/gemini-3.5-flash"}),
+        (200, b"worker-two-ok", {"wire_model": "models/gemini-3.5-flash"}),
+    ]
+
+    class FakeNativeUiWorkerPool:
+        def __init__(self, *, auth_file, worker_count):
+            self.auth_file = auth_file
+            self.worker_count = worker_count
+
+        def send_with_metadata(self, *, model, prompt, timeout_ms, max_attempts=None, retry_statuses=None, prefer_recent_worker=True):
+            calls.append({
+                "model": model,
+                "prompt": prompt,
+                "timeout_ms": timeout_ms,
+                "max_attempts": max_attempts,
+                "retry_statuses": retry_statuses,
+                "prefer_recent_worker": prefer_recent_worker,
+            })
+            result = results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(session_module, "NativeUiWorkerPool", FakeNativeUiWorkerPool)
+    monkeypatch.setattr(session_module.settings, "native_ui_workers_per_account", 2)
+    session = BrowserSession(port=0)
+    session._auth_file = str(auth_file)
+
+    status, raw, wire_model = session._probe_native_worker_generate_content_sync(model="gemini-3.5-flash", timeout_ms=300000)
+
+    assert (status, raw, wire_model) == (200, b"worker-two-ok", "models/gemini-3.5-flash")
+    assert len(calls) == 3
+    assert all(call["max_attempts"] == 1 for call in calls)
+    assert all(call["retry_statuses"] == (401, 403) for call in calls)
+    assert all(call["prefer_recent_worker"] is False for call in calls)
+
+
+def test_probe_native_worker_generate_content_requires_distinct_worker_successes(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    calls = []
+    results = [
+        (200, b"worker-zero-first", {"wire_model": "models/gemini-3.5-flash", "worker_index": 0}),
+        (200, b"worker-zero-second", {"wire_model": "models/gemini-3.5-flash", "worker_index": 0}),
+        (200, b"worker-one-ok", {"wire_model": "models/gemini-3.5-flash", "worker_index": 1}),
+    ]
+
+    class FakeNativeUiWorkerPool:
+        def __init__(self, *, auth_file, worker_count):
+            self.auth_file = auth_file
+            self.worker_count = worker_count
+
+        def send_with_metadata(self, *, model, prompt, timeout_ms, max_attempts=None, retry_statuses=None, prefer_recent_worker=True):
+            calls.append({
+                "model": model,
+                "prompt": prompt,
+                "timeout_ms": timeout_ms,
+                "max_attempts": max_attempts,
+                "retry_statuses": retry_statuses,
+                "prefer_recent_worker": prefer_recent_worker,
+            })
+            return results.pop(0)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(session_module, "NativeUiWorkerPool", FakeNativeUiWorkerPool)
+    monkeypatch.setattr(session_module.settings, "native_ui_workers_per_account", 2)
+    session = BrowserSession(port=0)
+    session._auth_file = str(auth_file)
+
+    status, raw, wire_model = session._probe_native_worker_generate_content_sync(model="gemini-3.5-flash", timeout_ms=300000)
+
+    assert (status, raw, wire_model) == (200, b"worker-one-ok", "models/gemini-3.5-flash")
+    assert len(calls) == 3
+
+
+def test_probe_native_worker_generate_content_continues_after_recoverable_click_timeout(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    calls = []
+    results = [
+        NativeUiWorkerRequestError(
+            "native UI worker pool request failed after retry: TimeoutError: "
+            "ElementHandle.click: Timeout 30000ms exceeded; element is not enabled"
+        ),
+        (200, b"worker-zero-ok", {"wire_model": "models/gemini-3.5-flash", "worker_index": 0}),
+        (200, b"worker-one-ok", {"wire_model": "models/gemini-3.5-flash", "worker_index": 1}),
+    ]
+
+    class FakeNativeUiWorkerPool:
+        def __init__(self, *, auth_file, worker_count):
+            self.auth_file = auth_file
+            self.worker_count = worker_count
+
+        def send_with_metadata(self, *, model, prompt, timeout_ms, max_attempts=None, retry_statuses=None, prefer_recent_worker=True):
+            calls.append({
+                "model": model,
+                "prompt": prompt,
+                "timeout_ms": timeout_ms,
+                "max_attempts": max_attempts,
+                "retry_statuses": retry_statuses,
+                "prefer_recent_worker": prefer_recent_worker,
+            })
+            result = results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(session_module, "NativeUiWorkerPool", FakeNativeUiWorkerPool)
+    monkeypatch.setattr(session_module.settings, "native_ui_workers_per_account", 2)
+    session = BrowserSession(port=0)
+    session._auth_file = str(auth_file)
+
+    status, raw, wire_model = session._probe_native_worker_generate_content_sync(model="gemini-3.5-flash", timeout_ms=300000)
+
+    assert (status, raw, wire_model) == (200, b"worker-one-ok", "models/gemini-3.5-flash")
+    assert len(calls) == 3
+    assert all(call["max_attempts"] == 1 for call in calls)
+    assert all(call["retry_statuses"] == (401, 403) for call in calls)
+    assert all(call["prefer_recent_worker"] is False for call in calls)
 
 
 def test_switch_auth_closes_native_worker_pool(tmp_path, monkeypatch):
