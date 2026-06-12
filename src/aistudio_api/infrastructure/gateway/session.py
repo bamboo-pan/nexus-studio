@@ -27,6 +27,17 @@ class _NativeUiReplayUnsupported(RuntimeError):
     pass
 
 
+def _is_per_user_quota_ambiguous_response(status: int, raw: bytes | str | None) -> bool:
+    if int(status or 0) != 404:
+        return False
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8", errors="replace")
+    else:
+        text = str(raw or "")
+    lower_text = text.lower()
+    return "ambiguous request" in lower_text and "streamgeneratecontentperuserquota" in lower_text
+
+
 def _native_worker_unavailable_error(exc: BaseException) -> RequestError:
     return RequestError(503, f"native UI worker unavailable: {exc}")
 
@@ -39,6 +50,9 @@ def _native_worker_warmup_error_is_recoverable(exc: BaseException) -> bool:
             "ai studio text model not selected in native ui sender",
             "current_text_model_not_found",
             "text_category",
+            "elementhandle.click: timeout",
+            "element is not enabled",
+            "waiting for element to be visible, enabled and stable",
         )
     )
 
@@ -1266,6 +1280,10 @@ class BrowserSession:
             if (status == 204 or raw_len == 0) and len(observed_responses) < 5:
                 observed_responses.append(f"{response_url} status={status} body={raw_len}")
                 return
+            if _is_per_user_quota_ambiguous_response(status, raw):
+                if len(observed_responses) < 5:
+                    observed_responses.append(f"{response_url} status={status} per_user_quota_ambiguous=true")
+                return
             response_holder["status"] = status
             response_holder["body"] = raw
 
@@ -1423,7 +1441,7 @@ class BrowserSession:
         last_wire_model = ""
         required_successes = max(1, pool.worker_count)
         max_probe_attempts = required_successes * 2
-        successful_probes = 0
+        successful_worker_indexes: set[object] = set()
         last_recoverable_error: NativeUiWorkerRequestError | None = None
         for _ in range(max_probe_attempts):
             try:
@@ -1446,8 +1464,9 @@ class BrowserSession:
             last_wire_model = str(metadata.get("wire_model") or "")
             if status != 200:
                 return status, raw, last_wire_model
-            successful_probes += 1
-            if successful_probes >= required_successes:
+            worker_index = metadata.get("worker_index")
+            successful_worker_indexes.add(worker_index if worker_index is not None else len(successful_worker_indexes))
+            if len(successful_worker_indexes) >= required_successes:
                 return last_status, last_raw, last_wire_model
         if last_recoverable_error is not None:
             raise last_recoverable_error
@@ -1598,6 +1617,10 @@ class BrowserSession:
             raw_len = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw or b"")
             if (status == 204 or raw_len == 0) and len(observed_responses) < 5:
                 observed_responses.append(f"{response_url} status={status} body={raw_len} model={wire_model}")
+                return
+            if _is_per_user_quota_ambiguous_response(status, raw):
+                if len(observed_responses) < 5:
+                    observed_responses.append(f"{response_url} status={status} per_user_quota_ambiguous=true model={wire_model}")
                 return
             if status >= 400:
                 log.info(

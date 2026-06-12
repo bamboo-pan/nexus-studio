@@ -274,6 +274,88 @@ def test_responses_search_image_fallback_splits_builtin_search_and_function_tool
     }
 
 
+def test_responses_search_image_empty_decision_generates_explicit_image_request(monkeypatch):
+    captured_tools = []
+    captured_image_request = {}
+
+    async def fake_handle_chat(req, client, request=None):
+        captured_tools.append(req.tools)
+        return {
+            "choices": [{"message": {"content": ""}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 0},
+        }
+
+    async def fake_handle_image_generation(req, client):
+        captured_image_request["model"] = req.model
+        captured_image_request["prompt"] = req.prompt
+        captured_image_request["size"] = req.size
+        return {"data": [{"b64_json": "ZmFrZQ==", "mime_type": "image/png"}], "usage": {"total_tokens": 1}}
+
+    monkeypatch.setattr(api_service, "handle_chat", fake_handle_chat)
+    monkeypatch.setattr(api_service, "handle_image_generation", fake_handle_image_generation)
+
+    response = asyncio.run(
+        api_service.handle_openai_responses(
+            {
+                "model": "gemini-3-flash-preview",
+                "input": "Search recent visual references and create an image of a neon city skyline.",
+                "tools": [
+                    {"type": "web_search_preview"},
+                    {"type": "image_generation", "provider": "google-ai-studio", "model": "gemini-3.1-flash-image-preview"},
+                ],
+            },
+            client=object(),
+        )
+    )
+
+    assert len(captured_tools) == 1
+    assert [tool.type for tool in captured_tools[0]] == ["web_search_preview"]
+    assert captured_image_request == {
+        "model": "gemini-3.1-flash-image-preview",
+        "prompt": "Search recent visual references and create an image of a neon city skyline.",
+        "size": "1024x1024",
+    }
+    assert response["output_text"] == "Generated image"
+    assert response["output"][0]["type"] == "web_search_call"
+    assert response["output"][1]["type"] == "image_generation_call"
+
+
+def test_responses_search_image_empty_decision_respects_explicit_no_image_request(monkeypatch):
+    image_calls = []
+
+    async def fake_handle_chat(req, client, request=None):
+        return {
+            "choices": [{"message": {"content": "nexus-text-ok"}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+        }
+
+    async def fake_handle_image_generation(req, client):
+        image_calls.append(req)
+        return {"data": [{"b64_json": "ZmFrZQ==", "mime_type": "image/png"}]}
+
+    monkeypatch.setattr(api_service, "handle_chat", fake_handle_chat)
+    monkeypatch.setattr(api_service, "handle_image_generation", fake_handle_image_generation)
+
+    response = asyncio.run(
+        api_service.handle_openai_responses(
+            {
+                "model": "gemini-3-flash-preview",
+                "input": "Do not create an image. Reply with exactly: nexus-text-ok",
+                "tools": [
+                    {"type": "web_search_preview"},
+                    {"type": "image_generation", "provider": "google-ai-studio", "model": "gemini-3.1-flash-image-preview"},
+                ],
+            },
+            client=object(),
+        )
+    )
+
+    assert image_calls == []
+    assert response["output_text"] == "nexus-text-ok"
+    assert response["output"][0]["type"] == "web_search_call"
+    assert response["output"][1]["type"] == "message"
+
+
 def test_responses_image_tool_retries_google_image_model_not_found(monkeypatch):
     image_models = []
 
@@ -312,6 +394,88 @@ def test_responses_image_tool_retries_google_image_model_not_found(monkeypatch):
     assert image_models == ["gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"]
     assert response["output"][0]["type"] == "image_generation_call"
     assert response["thinking"] == "Image generation tool selected gemini-3-pro-image-preview at 1024x1024."
+
+
+def test_responses_image_tool_accepts_gemini_dalle_text_action(monkeypatch):
+    captured_image_request = {}
+
+    async def fake_handle_chat(req, client, request=None):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "action": "dalle.text2im",
+                                "action_input": json.dumps(
+                                    {
+                                        "prompt": "A simple, solid blue square icon centered on a plain white background.",
+                                    }
+                                ),
+                                "thought": "The user wants an image.",
+                            }
+                        )
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4},
+        }
+
+    async def fake_handle_image_generation(req, client):
+        captured_image_request["model"] = req.model
+        captured_image_request["prompt"] = req.prompt
+        captured_image_request["size"] = req.size
+        return {"data": [{"b64_json": "ZmFrZQ==", "mime_type": "image/png"}], "usage": {"total_tokens": 1}}
+
+    monkeypatch.setattr(api_service, "handle_chat", fake_handle_chat)
+    monkeypatch.setattr(api_service, "handle_image_generation", fake_handle_image_generation)
+
+    response = asyncio.run(
+        api_service.handle_openai_responses(
+            {
+                "model": "gemini-3-flash-preview",
+                "input": "Create an image: a simple blue square icon on a plain white background.",
+                "tools": [{"type": "image_generation", "provider": "google-ai-studio", "model": "gemini-3.1-flash-image-preview"}],
+            },
+            client=object(),
+        )
+    )
+
+    assert captured_image_request == {
+        "model": "gemini-3.1-flash-image-preview",
+        "prompt": "A simple, solid blue square icon centered on a plain white background.",
+        "size": "1024x1024",
+    }
+    assert response["output_text"] == "Generated image"
+    assert response["output"][0]["type"] == "image_generation_call"
+
+
+def test_responses_reasoning_effort_maps_to_chat_thinking(monkeypatch):
+    captured = {}
+
+    async def fake_handle_chat(req, client, request=None):
+        captured["thinking"] = req.thinking
+        return {
+            "choices": [{"message": {"content": "ok"}}],
+            "model": req.model,
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+
+    monkeypatch.setattr(api_service, "handle_chat", fake_handle_chat)
+
+    response = asyncio.run(
+        api_service.handle_openai_responses(
+            {
+                "model": "gemini-3-flash-preview",
+                "input": "reason briefly",
+                "reasoning": {"effort": "high", "summary": "auto"},
+            },
+            client=object(),
+        )
+    )
+
+    assert captured["thinking"] == "high"
+    assert response["output_text"] == "ok"
 
 
 async def collect_response_stream_payloads(response):
@@ -391,6 +555,58 @@ def test_responses_image_tool_stream_generates_image_after_streamed_tool_decisio
     completed = next(event for event in events if event.get("type") == "response.completed")
 
     assert captured_image_request == {"model": "gemini-3-pro-image-preview", "prompt": "red square", "size": "1024x1024"}
+    assert any(event.get("type") == "response.function_call_arguments.done" for event in events)
+    assert any(event.get("type") == "response.image_generation_call.partial_image" for event in events)
+    assert completed["response"]["output_text"] == "Generated image"
+    assert completed["response"]["output"][0]["type"] == "image_generation_call"
+
+
+def test_responses_image_tool_stream_accepts_gemini_dalle_text_action(monkeypatch):
+    captured_image_request = {}
+
+    async def fake_handle_chat(req, client, request=None):
+        assert req.stream is True
+
+        async def body():
+            chunks = [
+                '{\n  "action": "dalle.text2im",\n  "action_input": "{ \\"',
+                'prompt\\": \\"blue square\\" }",\n  "thought": "The user wants an image."\n}',
+            ]
+            for index, chunk in enumerate(chunks):
+                choice = {"delta": {"content": chunk}}
+                if index == len(chunks) - 1:
+                    choice["finish_reason"] = "stop"
+                yield f"data: {json.dumps({'choices': [choice]})}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return api_service.StreamingResponse(body(), media_type="text/event-stream")
+
+    async def fake_handle_image_generation(req, client):
+        captured_image_request["model"] = req.model
+        captured_image_request["prompt"] = req.prompt
+        captured_image_request["size"] = req.size
+        return {"data": [{"b64_json": "ZmFrZQ==", "mime_type": "image/png"}], "usage": {"total_tokens": 1}}
+
+    monkeypatch.setattr(api_service, "handle_chat", fake_handle_chat)
+    monkeypatch.setattr(api_service, "handle_image_generation", fake_handle_image_generation)
+
+    response = asyncio.run(
+        api_service.handle_openai_responses(
+            {
+                "model": "gemini-3-flash-preview",
+                "input": "Create an image: a simple blue square icon on a plain white background.",
+                "stream": True,
+                "tools": [{"type": "image_generation", "provider": "google-ai-studio", "model": "gemini-3.1-flash-image-preview"}],
+            },
+            client=object(),
+        )
+    )
+    payloads = asyncio.run(collect_response_stream_payloads(response))
+    events = [json.loads(payload) for payload in payloads if payload != "[DONE]"]
+    completed = next(event for event in events if event.get("type") == "response.completed")
+
+    assert captured_image_request == {"model": "gemini-3.1-flash-image-preview", "prompt": "blue square", "size": "1024x1024"}
+    assert not any(event.get("type") == "response.output_text.delta" for event in events)
     assert any(event.get("type") == "response.function_call_arguments.done" for event in events)
     assert any(event.get("type") == "response.image_generation_call.partial_image" for event in events)
     assert completed["response"]["output_text"] == "Generated image"

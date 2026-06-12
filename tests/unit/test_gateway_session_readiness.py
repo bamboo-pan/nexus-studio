@@ -1209,6 +1209,95 @@ def test_probe_native_worker_generate_content_continues_after_recoverable_model_
     assert all(call["prefer_recent_worker"] is False for call in calls)
 
 
+def test_probe_native_worker_generate_content_requires_distinct_worker_successes(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    calls = []
+    results = [
+        (200, b"worker-zero-first", {"wire_model": "models/gemini-3.5-flash", "worker_index": 0}),
+        (200, b"worker-zero-second", {"wire_model": "models/gemini-3.5-flash", "worker_index": 0}),
+        (200, b"worker-one-ok", {"wire_model": "models/gemini-3.5-flash", "worker_index": 1}),
+    ]
+
+    class FakeNativeUiWorkerPool:
+        def __init__(self, *, auth_file, worker_count):
+            self.auth_file = auth_file
+            self.worker_count = worker_count
+
+        def send_with_metadata(self, *, model, prompt, timeout_ms, max_attempts=None, retry_statuses=None, prefer_recent_worker=True):
+            calls.append({
+                "model": model,
+                "prompt": prompt,
+                "timeout_ms": timeout_ms,
+                "max_attempts": max_attempts,
+                "retry_statuses": retry_statuses,
+                "prefer_recent_worker": prefer_recent_worker,
+            })
+            return results.pop(0)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(session_module, "NativeUiWorkerPool", FakeNativeUiWorkerPool)
+    monkeypatch.setattr(session_module.settings, "native_ui_workers_per_account", 2)
+    session = BrowserSession(port=0)
+    session._auth_file = str(auth_file)
+
+    status, raw, wire_model = session._probe_native_worker_generate_content_sync(model="gemini-3.5-flash", timeout_ms=300000)
+
+    assert (status, raw, wire_model) == (200, b"worker-one-ok", "models/gemini-3.5-flash")
+    assert len(calls) == 3
+
+
+def test_probe_native_worker_generate_content_continues_after_recoverable_click_timeout(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    calls = []
+    results = [
+        NativeUiWorkerRequestError(
+            "native UI worker pool request failed after retry: TimeoutError: "
+            "ElementHandle.click: Timeout 30000ms exceeded; element is not enabled"
+        ),
+        (200, b"worker-zero-ok", {"wire_model": "models/gemini-3.5-flash", "worker_index": 0}),
+        (200, b"worker-one-ok", {"wire_model": "models/gemini-3.5-flash", "worker_index": 1}),
+    ]
+
+    class FakeNativeUiWorkerPool:
+        def __init__(self, *, auth_file, worker_count):
+            self.auth_file = auth_file
+            self.worker_count = worker_count
+
+        def send_with_metadata(self, *, model, prompt, timeout_ms, max_attempts=None, retry_statuses=None, prefer_recent_worker=True):
+            calls.append({
+                "model": model,
+                "prompt": prompt,
+                "timeout_ms": timeout_ms,
+                "max_attempts": max_attempts,
+                "retry_statuses": retry_statuses,
+                "prefer_recent_worker": prefer_recent_worker,
+            })
+            result = results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(session_module, "NativeUiWorkerPool", FakeNativeUiWorkerPool)
+    monkeypatch.setattr(session_module.settings, "native_ui_workers_per_account", 2)
+    session = BrowserSession(port=0)
+    session._auth_file = str(auth_file)
+
+    status, raw, wire_model = session._probe_native_worker_generate_content_sync(model="gemini-3.5-flash", timeout_ms=300000)
+
+    assert (status, raw, wire_model) == (200, b"worker-one-ok", "models/gemini-3.5-flash")
+    assert len(calls) == 3
+    assert all(call["max_attempts"] == 1 for call in calls)
+    assert all(call["retry_statuses"] == (401, 403) for call in calls)
+    assert all(call["prefer_recent_worker"] is False for call in calls)
+
+
 def test_switch_auth_closes_native_worker_pool(tmp_path, monkeypatch):
     first_auth = tmp_path / "first.json"
     second_auth = tmp_path / "second.json"

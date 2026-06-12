@@ -92,6 +92,9 @@ def _is_transient_warmup_error(exc: BaseException) -> bool:
         "native ui sender timeout",
         "targetclosederror",
         "target page, context or browser has been closed",
+        "elementhandle.click: timeout",
+        "element is not enabled",
+        "waiting for element to be visible, enabled and stable",
     )
     if any(marker in message for marker in readiness_markers):
         return True

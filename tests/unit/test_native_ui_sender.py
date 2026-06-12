@@ -46,6 +46,7 @@ class FakePage:
         self.open_picker_results = []
         self.open_picker_calls = 0
         self.response_model = "gemini-3.5-flash"
+        self.response_sequence = None
         self.current_model_read_calls = 0
         self.current_model_matches = False
         self.current_model_label = "Chat Spark Playground"
@@ -117,27 +118,21 @@ class FakePage:
     def _emit_responses(self):
         body = json.dumps([f"models/{self.response_model}", {"text": "warmup"}], ensure_ascii=False)
         request = FakeRequest(body)
-        responses = [
-            FakeResponse(
-                url=(
-                    "https://alkalimakersuite-pa.clients6.google.com/$rpc/"
-                    "google.internal.alkali.applications.makersuite.v1.MakerSuiteService/"
-                    "StreamGenerateContentPerUserQuota"
-                ),
-                status=404,
-                body=b"quota helper failed",
-                request=request,
+        generate_url = (
+            "https://alkalimakersuite-pa.clients6.google.com/$rpc/"
+            "google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent"
+        )
+        response_specs = self.response_sequence or [
+            (
+                "https://alkalimakersuite-pa.clients6.google.com/$rpc/"
+                "google.internal.alkali.applications.makersuite.v1.MakerSuiteService/"
+                "StreamGenerateContentPerUserQuota",
+                404,
+                b"quota helper failed",
             ),
-            FakeResponse(
-                url=(
-                    "https://alkalimakersuite-pa.clients6.google.com/$rpc/"
-                    "google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent"
-                ),
-                status=200,
-                body=b"main generate ok",
-                request=request,
-            ),
+            (generate_url, 200, b"main generate ok"),
         ]
+        responses = [FakeResponse(url=url, status=status, body=response_body, request=request) for url, status, response_body in response_specs]
         for response in responses:
             for handler in list(self.response_handlers):
                 handler(response)
@@ -152,6 +147,31 @@ def test_send_on_page_ignores_per_user_quota_generate_content_helper_response():
     assert base64.b64decode(str(result["body_b64"])) == b"main generate ok"
     assert result["wire_model"] == "models/gemini-3.5-flash"
     assert result["url_path"].endswith("/GenerateContent")
+
+
+def test_send_on_page_ignores_per_user_quota_ambiguous_body_on_generate_url():
+    page = FakePage()
+    generate_url = (
+        "https://alkalimakersuite-pa.clients6.google.com/$rpc/"
+        "google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent"
+    )
+    page.response_sequence = [
+        (
+            generate_url,
+            404,
+            (
+                "[, [5, \"Ambiguous request for service '' and method "
+                "'/GenerativeService.StreamGenerateContentPerUserQuota'. Please use fully qualified names.\"]]"
+            ).encode("utf-8"),
+        ),
+        (generate_url, 200, b"main generate ok after ambiguous helper"),
+    ]
+
+    result = _send_on_page(page, model="gemini-3.5-flash", prompt="warmup", timeout_ms=1000)
+
+    assert result["status"] == 200
+    assert base64.b64decode(str(result["body_b64"])) == b"main generate ok after ambiguous helper"
+    assert result["wire_model"] == "models/gemini-3.5-flash"
 
 
 def test_text_model_selector_scans_model_selector_cards():

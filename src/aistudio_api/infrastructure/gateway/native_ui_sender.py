@@ -30,6 +30,7 @@ from aistudio_api.infrastructure.gateway.session import (
     AI_STUDIO_SEND_BUTTON_JS,
     DIALOG_CLEANUP_JS,
     _aistudio_chat_urls,
+    _is_per_user_quota_ambiguous_response,
 )
 
 warnings.filterwarnings("ignore", message="When using a proxy, it is heavily recommended that you pass `geoip=True`.*")
@@ -351,6 +352,10 @@ def _send_on_page(page, *, model: str, prompt: str, timeout_ms: int, prime_home:
             raw = raw.encode("utf-8")
         if (status == 204 or not raw) and len(observed) < 5:
             observed.append(f"{_url_path(response_url)} status={status} body={len(raw)} model={wire_model}")
+            return
+        if _is_per_user_quota_ambiguous_response(status, raw):
+            if len(observed) < 5:
+                observed.append(f"{_url_path(response_url)} status={status} per_user_quota_ambiguous=true model={wire_model}")
             return
         response_holder.update(
             {

@@ -230,6 +230,31 @@ def _is_native_worker_unavailable(exc: RequestError) -> bool:
     return exc.status == 503 and "native UI worker unavailable" in (exc.message or "")
 
 
+def _usage_limit_is_quota_exhausted(exc: UsageLimitExceeded) -> bool:
+    message = _exception_message(exc).lower()
+    markers = (
+        "you exceeded your current quota",
+        "current quota",
+        "quota for the day",
+        "daily quota",
+        "quota resets",
+        "resource_exhausted",
+        "rate-limits",
+    )
+    return any(marker in message for marker in markers)
+
+
+def _rate_limit_account_kwargs(exc: UsageLimitExceeded | None) -> dict[str, Any]:
+    if exc is None or not _usage_limit_is_quota_exhausted(exc):
+        return {}
+    cooldown_seconds = max(1, int(getattr(settings, "account_quota_exhausted_cooldown_seconds", 21600)))
+    return {
+        "cooldown_seconds": cooldown_seconds,
+        "quota_exhausted": True,
+        "reason": "upstream quota is exhausted; account is paused until quota resets",
+    }
+
+
 async def _request_disconnected(request: Request | None) -> bool:
     if request is None:
         return False
@@ -660,6 +685,7 @@ def _record_account_result(
     *,
     image_size: str | None = None,
     image_count: int = 1,
+    rate_limit_error: UsageLimitExceeded | None = None,
 ) -> None:
     rotator = runtime_state.rotator
     if rotator is None or not account_id:
@@ -667,7 +693,7 @@ def _record_account_result(
     if event == "success":
         rotator.record_success(account_id, image_size=image_size, image_count=image_count)
     elif event == "rate_limited":
-        rotator.record_rate_limited(account_id)
+        rotator.record_rate_limited(account_id, **_rate_limit_account_kwargs(rate_limit_error))
     elif event == "errors":
         rotator.record_error(account_id)
 
@@ -680,6 +706,7 @@ def _record_request_result(
     account_id: str | None = None,
     image_size: str | None = None,
     image_count: int = 1,
+    rate_limit_error: UsageLimitExceeded | None = None,
 ) -> None:
     runtime_state.record(model, event, usage, image_size=image_size, image_count=image_count)
     _record_account_result(
@@ -687,6 +714,7 @@ def _record_request_result(
         event,
         image_size=image_size,
         image_count=image_count,
+        rate_limit_error=rate_limit_error,
     )
 
 
@@ -739,6 +767,30 @@ async def _request_replacement_account_context(
 
 def _is_empty_image_response(exc: RequestError) -> bool:
     return exc.status == 0 and "no image data" in exc.message.lower()
+
+
+def _is_transient_replay_network_error(exc: RequestError) -> bool:
+    if exc.status != 0:
+        return False
+    message = (exc.message or "").lower()
+    transient_markers = (
+        "enetunreach",
+        "ehostunreach",
+        "econnreset",
+        "econnrefused",
+        "etimedout",
+        "socket hang up",
+        "socket closed",
+        "connection reset",
+        "connection refused",
+        "connection closed",
+        "connect timeout",
+        "timed out",
+        "timeout",
+        "net::err",
+    )
+    replay_markers = ("apirequestcontext", "connect ", "fetch failed", "network", "socket", "timeout", "timed out")
+    return any(marker in message for marker in transient_markers) and any(marker in message for marker in replay_markers)
 
 
 def _hash_affinity(*parts: Any) -> str | None:
@@ -1094,27 +1146,71 @@ def _parse_responses_text_tool_request(text: str, allowed_tool_names: set[str]) 
     if not allowed_tool_names:
         return None
     prefix = "Tool call requested: "
-    if not text.startswith(prefix):
+    if text.startswith(prefix):
+        payload = text[len(prefix) :].strip()
+        if not payload:
+            return None
+        name, separator, arguments = payload.partition(" ")
+        if not separator or name not in allowed_tool_names:
+            return None
+        arguments = arguments.strip()
+        if not arguments:
+            return None
+        try:
+            json.loads(arguments)
+        except json.JSONDecodeError:
+            return None
+        return {"name": name, "arguments": arguments}
+    return _parse_responses_dalle_text_tool_request(text, allowed_tool_names)
+
+
+def _parse_responses_dalle_text_tool_request(text: str, allowed_tool_names: set[str]) -> dict[str, Any] | None:
+    if "image_generation" not in allowed_tool_names:
         return None
-    payload = text[len(prefix) :].strip()
-    if not payload:
+    payload = _parse_tool_arguments(text.strip())
+    if not isinstance(payload, dict):
         return None
-    name, separator, arguments = payload.partition(" ")
-    if not separator or name not in allowed_tool_names:
+    action = payload.get("action")
+    if not isinstance(action, str) or action.strip().lower() != "dalle.text2im":
         return None
-    arguments = arguments.strip()
-    if not arguments:
+    action_input = _parse_tool_arguments(payload.get("action_input"))
+    if not isinstance(action_input, dict):
+        action_input = {}
+    arguments: dict[str, str] = {}
+    for key in ("prompt", "size", "model"):
+        value = action_input.get(key, payload.get(key))
+        if isinstance(value, str) and value.strip():
+            arguments[key] = value.strip()
+    if "prompt" not in arguments:
         return None
-    try:
-        json.loads(arguments)
-    except json.JSONDecodeError:
-        return None
-    return {"name": name, "arguments": arguments}
+    return {"name": "image_generation", "arguments": json.dumps(arguments, ensure_ascii=False)}
+
+
+def _may_be_responses_dalle_text_tool_request(text: str, allowed_tool_names: set[str]) -> bool:
+    if "image_generation" not in allowed_tool_names:
+        return False
+    compact = "".join(text.strip().split())
+    if not compact:
+        return False
+    action_prefix = '{"action"'
+    if action_prefix.startswith(compact):
+        return True
+    if not compact.startswith('{"action":'):
+        return False
+    _prefix, _separator, value_fragment = compact.partition('{"action":')
+    if not value_fragment or value_fragment == '"':
+        return True
+    if not value_fragment.startswith('"'):
+        return False
+    action_fragment = value_fragment[1:].split('"', 1)[0]
+    return "dalle.text2im".startswith(action_fragment) or action_fragment == "dalle.text2im"
 
 
 def _may_be_responses_text_tool_request(text: str, allowed_tool_names: set[str]) -> bool:
     if not text or not allowed_tool_names:
         return False
+    if _may_be_responses_dalle_text_tool_request(text, allowed_tool_names):
+        return True
     prefix = "Tool call requested: "
     if prefix.startswith(text):
         return True
@@ -1555,6 +1651,48 @@ def _responses_image_tool_with_arguments(tool: dict[str, Any], tool_request: dic
     return selected
 
 
+def _responses_explicit_image_prompt_override(payload: dict[str, Any], tool: dict[str, Any], allowed_tool_names: set[str]) -> str | None:
+    if "image_generation" not in allowed_tool_names:
+        return None
+    latest_text = ""
+    for message in reversed(_messages_from_responses_payload(payload)):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            latest_text = content.strip()
+            break
+        if isinstance(content, list):
+            parts = [str(block.get("text") or "").strip() for block in content if isinstance(block, dict) and str(block.get("type") or "") in {"text", "input_text"}]
+            latest_text = "\n".join(part for part in parts if part).strip()
+            if latest_text:
+                break
+    if not latest_text:
+        return None
+    normalized = latest_text.lower()
+    negative_visual_intent = any(
+        marker in normalized
+        for marker in (
+            "do not create an image",
+            "do not generate an image",
+            "don't create an image",
+            "don't generate an image",
+            "without creating an image",
+            "without generating an image",
+            "no image",
+        )
+    ) or any(marker in latest_text for marker in ("不要生成图片", "不要创建图片", "别生成图片", "不生成图片", "无需生成图片"))
+    if negative_visual_intent:
+        return None
+    english_action = any(marker in normalized for marker in ("generate", "create", "draw", "make", "render", "illustrate"))
+    english_visual = any(marker in normalized for marker in ("image", "picture", "photo", "icon", "infographic", "illustration"))
+    chinese_action = any(marker in latest_text for marker in ("生成", "创建", "绘制", "画"))
+    chinese_visual = any(marker in latest_text for marker in ("图片", "图像", "图标", "信息图", "插画", "照片"))
+    if not ((english_action and english_visual) or (chinese_action and chinese_visual)):
+        return None
+    return latest_text
+
+
 def _responses_google_image_fallback_models(current_model: str) -> list[str]:
     candidates = ["gemini-3-pro-image-preview", DEFAULT_IMAGE_MODEL]
     fallbacks: list[str] = []
@@ -1632,6 +1770,22 @@ def _responses_decision_response_format(payload: dict[str, Any]) -> Any:
     return response_format
 
 
+def _responses_thinking_value(payload: dict[str, Any]) -> str | bool | None:
+    direct = payload.get("thinking")
+    if direct is not None:
+        return direct
+    reasoning = payload.get("reasoning")
+    if not isinstance(reasoning, dict):
+        return None
+    effort = reasoning.get("effort")
+    if isinstance(effort, bool):
+        return effort
+    if isinstance(effort, str):
+        normalized = effort.strip()
+        return normalized or None
+    return None
+
+
 def _responses_image_decision_payload_and_tools(payload: dict[str, Any], tool: dict[str, Any]) -> tuple[dict[str, Any], set[str]]:
     decision_payload = _responses_optional_image_payload(payload)
     allowed_tool_names = _tool_names_from_payload(decision_payload.get("tools"))
@@ -1649,7 +1803,7 @@ def _responses_decision_chat_request(payload: dict[str, Any], current_payload: d
         top_p=payload.get("top_p"),
         max_tokens=payload.get("max_output_tokens") or payload.get("max_tokens"),
         tools=_messages_tools_from_payload(current_payload.get("tools")),
-        thinking=payload.get("thinking"),
+        thinking=_responses_thinking_value(payload),
         response_format=_responses_decision_response_format(payload),
     )
 
@@ -1718,6 +1872,32 @@ async def _complete_responses_optional_image_generation(
         chat_response = await handle_chat(chat_req, client)
     image_tool_request = _responses_image_tool_request(chat_response, allowed_tool_names)
     if image_tool_request is None:
+        prompt_override = _responses_explicit_image_prompt_override(payload, tool, allowed_tool_names)
+        if prompt_override:
+            image_request, image_response = await _responses_generate_image_with_fallback(payload, tool, client, prompt_override=prompt_override)
+            image_items = _responses_image_generation_output_items(image_response)
+            if not image_items:
+                raise HTTPException(502, detail={"message": "Image generation returned no image data", "type": "upstream_error"})
+            output_items = []
+            if uses_search:
+                output_items.append(_responses_web_search_item())
+            output_items.extend(image_items)
+            return {
+                "id": response_id or f"resp_{uuid.uuid4().hex[:24]}",
+                "object": "response",
+                "created_at": created_at or int(time.time()),
+                "status": "completed",
+                "model": payload["model"],
+                "output": output_items,
+                "output_text": "Generated image",
+                "thinking": _responses_image_tool_trace(
+                    model=image_request.model,
+                    size=image_request.size,
+                    uses_search=uses_search,
+                    search_thinking=_chat_thinking(chat_response).strip(),
+                ),
+                "usage": _merge_usage(dict(chat_response.get("usage") or {}), image_response.get("usage")) or None,
+            }
         response = _responses_chat_response_payload(payload, chat_response, uses_search=uses_search, allowed_tool_names=allowed_tool_names)
         if response_id is not None:
             response["id"] = response_id
@@ -2178,7 +2358,7 @@ async def handle_openai_responses(payload: dict[str, Any], client: AIStudioClien
             top_p=payload.get("top_p"),
             max_tokens=payload.get("max_output_tokens") or payload.get("max_tokens"),
             tools=_messages_tools_from_payload(payload.get("tools")),
-            thinking=payload.get("thinking"),
+            thinking=_responses_thinking_value(payload),
             response_format=response_format,
         )
         uses_search = _chat_request_uses_search(chat_req)
@@ -2691,7 +2871,7 @@ async def handle_chat(req: ChatRequest, client: AIStudioClient, request: Request
                 )
             except UsageLimitExceeded as exc:
                 failed_account_id = account_context.account_id if account_context is not None else None
-                _record_request_result(model, "rate_limited", account_id=failed_account_id)
+                _record_request_result(model, "rate_limited", account_id=failed_account_id, rate_limit_error=exc)
                 last_error = exc
                 exclude_account_id = failed_account_id
 
@@ -2837,7 +3017,7 @@ async def handle_image_generation(req: ImageRequest, client: AIStudioClient):
                 except UsageLimitExceeded as exc:
                     _cleanup_persisted_image_items(image_store, items)
                     failed_account_id = account_context.account_id if account_context is not None else None
-                    _record_request_result(image_plan.model, "rate_limited", account_id=failed_account_id)
+                    _record_request_result(image_plan.model, "rate_limited", account_id=failed_account_id, rate_limit_error=exc)
                     last_error = exc
                     exclude_account_id = failed_account_id
 
@@ -2870,6 +3050,11 @@ async def handle_image_generation(req: ImageRequest, client: AIStudioClient):
                     _cleanup_persisted_image_items(image_store, items)
                     if attempt == 0 and _is_empty_image_response(exc):
                         logger.warning("Image response contained no image data; clearing capture state and retrying once")
+                        _clear_client_capture_state(account_context.client if account_context is not None else client)
+                        last_error = exc
+                        continue
+                    if attempt == 0 and _is_transient_replay_network_error(exc):
+                        logger.warning("Image replay network error; clearing capture state and retrying once: %s", exc)
                         _clear_client_capture_state(account_context.client if account_context is not None else client)
                         last_error = exc
                         continue
@@ -3053,6 +3238,12 @@ def _build_streaming_response(
             except asyncio.CancelledError:
                 logger.info("OpenAI stream cancelled by client")
                 raise
+            except UsageLimitExceeded as exc:
+                _record_request_result(model, "rate_limited", account_id=_account_id_for_stats(active_account_context), rate_limit_error=exc)
+                message, error_type, code = _openai_stream_error_detail(exc)
+                logger.warning("OpenAI stream rate limited: %s", message)
+                yield sse_error(message, error_type=error_type, code=code)
+                yield "data: [DONE]\n\n"
             except Exception as exc:
                 _record_request_result(model, "errors", account_id=_account_id_for_stats(active_account_context))
                 message, error_type, code = _openai_stream_error_detail(exc)
@@ -3163,7 +3354,7 @@ async def handle_gemini_generate_content(
                 raise HTTPException(400, detail={"message": str(exc), "type": "bad_request"}) from exc
             except UsageLimitExceeded as exc:
                 failed_account_id = account_context.account_id if account_context is not None else None
-                _record_request_result(normalized["model"] if normalized else model_path, "rate_limited", account_id=failed_account_id)
+                _record_request_result(normalized["model"] if normalized else model_path, "rate_limited", account_id=failed_account_id, rate_limit_error=exc)
                 last_error = exc
                 exclude_account_id = failed_account_id
 
@@ -3384,6 +3575,12 @@ def _build_gemini_streaming_response(
             except asyncio.CancelledError:
                 logger.info("Gemini stream cancelled by client")
                 raise
+            except UsageLimitExceeded as exc:
+                _record_request_result(normalized["model"], "rate_limited", account_id=_account_id_for_stats(active_account_context), rate_limit_error=exc)
+                error_payload = _gemini_stream_error_payload(exc)
+                logger.warning("Gemini stream rate limited: %s", error_payload["error"].get("message"))
+                yield "data: " + json.dumps(error_payload, ensure_ascii=False) + "\n\n"
+                yield "data: [DONE]\n\n"
             except Exception as exc:
                 _record_request_result(normalized["model"], "errors", account_id=_account_id_for_stats(active_account_context))
                 error_payload = _gemini_stream_error_payload(exc)

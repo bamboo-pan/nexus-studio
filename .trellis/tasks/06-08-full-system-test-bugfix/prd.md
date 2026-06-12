@@ -27,7 +27,7 @@ Run the repository's full real system-test workflow from a clean WSL copy with r
 * [ ] Any discovered bug has a root-cause fix or is recorded as an explicit environment/coverage blocker with evidence.
 * [ ] Relevant unit tests pass after code changes.
 * [ ] Final real WSL system test has been rerun after fixes from a clean temporary copy.
-* [ ] Task artifacts include `system-test-wsl.sh`, `host-ui-smoke.py`, plan-alignment contract test, PRD, research notes, and final report.
+* [ ] Task artifacts include reusable `tests/system/system-test-wsl.sh`, `tests/system/host-ui-smoke.py`, `tests/system/test_matrix_harness_contract.py`, `tests/system/build_matrix_coverage_excel.py`, PRD, research notes, and final report.
 
 ## Out of Scope
 
@@ -40,4 +40,5 @@ Run the repository's full real system-test workflow from a clean WSL copy with r
 * Relevant spec: `.trellis/spec/backend/quality-guidelines.md`, especially native worker and real system-test oracle sections.
 * Runner source: `.trellis/tasks/archive/2026-06/06-08-local-studio-google-budget-matrix/system-test-wsl.sh`.
 * Host UI smoke source: `.trellis/tasks/archive/2026-06/06-08-local-studio-google-budget-matrix/host-ui-smoke.py`.
+* Reusable runner destination after this task: `tests/system/`.
 * Previous blocker summary recorded in `research/system-test-scope.md`.

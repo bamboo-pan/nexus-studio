@@ -90,6 +90,7 @@ def test_native_ui_worker_pool_can_return_response_metadata():
     assert (status, raw) == (201, b"metadata-ok")
     assert metadata["wire_model"] == "models/gemini-3.5-flash"
     assert metadata["body_size"] == len(b"metadata-ok")
+    assert metadata["worker_index"] == 0
 
 
 def test_native_ui_worker_pool_prefers_recent_success_for_serial_requests():

@@ -595,5 +595,5 @@ async def _stream_local_studio_chat(
         else:
             store.add_assistant_message(conversation, content=content or ("Generated image" if images else "(no response content)"), thinking=thinking, usage=usage, images=images)
         saved = store.save(conversation)
-        done = {"type": "local_studio.completed", "conversation": saved, "elapsed_ms": elapsed_ms, "interface_mode": mode}
+        done = {"type": "local_studio.completed", "conversation": saved, "request": request_body, "elapsed_ms": elapsed_ms, "interface_mode": mode}
         yield f"data: {json.dumps(done, ensure_ascii=False)}\n\n".encode("utf-8")
